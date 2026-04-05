@@ -32,6 +32,7 @@ private slots:
     void onActivated  (const QModelIndex& proxyIndex);
     void showContextMenu(const QPoint& pos);
     void onViewScrolled();
+    void onProxyModelChanged();
 
 private:
     void buildUi();

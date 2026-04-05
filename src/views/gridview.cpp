@@ -55,6 +55,12 @@ void GridView::buildUi()
     connect(m_listView->verticalScrollBar(), &QScrollBar::valueChanged,
             this, &GridView::onViewScrolled);
 
+    // Request thumbnails when proxy model is updated (folder changed, filter changed, etc)
+    connect(m_proxy, &SearchFilterProxy::layoutChanged,
+            this, &GridView::onProxyModelChanged);
+    connect(m_proxy, &SearchFilterProxy::modelReset,
+            this, &GridView::onProxyModelChanged);
+
     layout->addWidget(m_listView);
 }
 
@@ -99,6 +105,14 @@ void GridView::showContextMenu(const QPoint& pos)
 
 void GridView::onViewScrolled()
 {
+    requestVisibleThumbnails();
+}
+
+void GridView::onProxyModelChanged()
+{
+    // When the proxy model changes (folder filter, search, etc),
+    // scroll to top and reload visible thumbnails
+    m_listView->scrollToTop();
     requestVisibleThumbnails();
 }
 

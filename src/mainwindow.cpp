@@ -26,7 +26,6 @@
 #include <QMenu>
 #include <QToolBar>
 #include <QStatusBar>
-#include <QDockWidget>
 #include <QSplitter>
 #include <QLineEdit>
 #include <QAction>
@@ -63,7 +62,6 @@ MainWindow::MainWindow(QWidget* parent)
     initMenuBar();
     initToolBar();
     initStatusBar();
-    initDockWidgets();
     connectSignals();
 
     // Load persisted data
@@ -117,7 +115,7 @@ void MainWindow::initControllers()
 
 void MainWindow::initViews()
 {
-    // ── Central splitter ──────────────────────────────────────────────────────
+    // ── Central splitter (3-way: folders | main view | recent) ─────────────────
     m_splitter    = new QSplitter(Qt::Horizontal, this);
     m_folderPanel = new FolderPanel(m_folderTreeModel, m_tagModel, m_splitter);
 
@@ -128,11 +126,16 @@ void MainWindow::initViews()
     m_viewStack->addWidget(m_listView);   // index 0 = list
     m_viewStack->addWidget(m_gridView);   // index 1 = grid
 
+    m_recentView  = new RecentView(m_pdfModel, m_splitter);
+
     m_splitter->addWidget(m_folderPanel);
     m_splitter->addWidget(m_viewStack);
-    m_splitter->setStretchFactor(0, 0);   // folder panel: fixed
-    m_splitter->setStretchFactor(1, 1);   // main content: stretch
-    m_splitter->setSizes({220, 700});
+    m_splitter->addWidget(m_recentView);
+
+    m_splitter->setStretchFactor(0, 0);   // folder panel:  fixed (220px)
+    m_splitter->setStretchFactor(1, 1);   // main content:  stretch
+    m_splitter->setStretchFactor(2, 0);   // recent panel:  fixed (240px)
+    m_splitter->setSizes({220, 700, 240});
 
     setCentralWidget(m_splitter);
 }
@@ -217,13 +220,6 @@ void MainWindow::initMenuBar()
     gridViewAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+2")));
     connect(gridViewAct, &QAction::triggered, this, &MainWindow::switchToGridView);
 
-    viewMenu->addSeparator();
-
-    QAction* recentAct = viewMenu->addAction(QStringLiteral("Toggle &Recent Panel"));
-    connect(recentAct, &QAction::triggered, this, [this]() {
-        if (m_recentDock) m_recentDock->setVisible(!m_recentDock->isVisible());
-    });
-
     // ── Tags ──────────────────────────────────────────────────────────────────
     QMenu* tagMenu = menuBar()->addMenu(QStringLiteral("&Tags"));
     QAction* tagMgrAct = tagMenu->addAction(QStringLiteral("&Manage Tags…"));
@@ -237,6 +233,15 @@ void MainWindow::initMenuBar()
     toolsMenu->addSeparator();
     QAction* settingsAct = toolsMenu->addAction(QStringLiteral("&Settings…"));
     connect(settingsAct, &QAction::triggered, this, &MainWindow::openSettings);
+
+    // ── Help ──────────────────────────────────────────────────────────────────
+    QMenu* helpMenu = menuBar()->addMenu(QStringLiteral("&Help"));
+    QAction* dataLocAct = helpMenu->addAction(QStringLiteral("Show &Data Location"));
+    connect(dataLocAct, &QAction::triggered, this, [this]() {
+        QMessageBox::information(this, QStringLiteral("Data Location"),
+                                 QStringLiteral("Application data is stored at:\n\n%1")
+                                 .arg(dataDir()));
+    });
 }
 
 void MainWindow::initStatusBar()
@@ -247,17 +252,6 @@ void MainWindow::initStatusBar()
 
     statusBar()->addWidget(m_statusLabel);
     statusBar()->addPermanentWidget(m_scanLabel);
-}
-
-void MainWindow::initDockWidgets()
-{
-    m_recentView = new RecentView(m_pdfModel, this);
-    m_recentDock = new QDockWidget(QStringLiteral("Recently Opened"), this);
-    m_recentDock->setObjectName(QStringLiteral("recentDock"));
-    m_recentDock->setWidget(m_recentView);
-    m_recentDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::RightDockWidgetArea);
-    addDockWidget(Qt::BottomDockWidgetArea, m_recentDock);
-    m_recentDock->setMaximumHeight(180);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,11 +365,20 @@ void MainWindow::onRemoveFolderRequested(const QString& path)
     const auto reply = QMessageBox::question(
         this,
         QStringLiteral("Remove Folder"),
-        QStringLiteral("Stop watching '%1'?\n\nPDF records will be kept in the database.")
+        QStringLiteral("Stop watching '%1'?\n\nPDF records in this folder will be removed.")
             .arg(path),
         QMessageBox::Yes | QMessageBox::Cancel);
 
     if (reply != QMessageBox::Yes) return;
+
+    // Remove all PDFs from this folder and its subfolders
+    const QList<PdfFile> allFiles = m_pdfModel->allFiles();
+    for (const PdfFile& f : allFiles) {
+        if (f.folderPath.startsWith(path)) {
+            m_pdfModel->removeFile(f.filePath);
+            m_db->deleteFile(f.filePath);
+        }
+    }
 
     m_db->deleteFolder(path);
     m_folderModel->removeFolder(path);   // triggers watcher via signal
@@ -733,10 +736,16 @@ void MainWindow::closeEvent(QCloseEvent* event)
     event->accept();
 }
 
-QString MainWindow::dbPath() const
+QString MainWindow::dataDir() const
 {
     const QString appData = QStandardPaths::writableLocation(
         QStandardPaths::AppDataLocation);
-    QDir().mkpath(appData);
-    return appData + QStringLiteral("/pdforganizer.db");
+    const QString dataDirPath = appData + QStringLiteral("/data");
+    QDir().mkpath(dataDirPath);
+    return dataDirPath;
+}
+
+QString MainWindow::dbPath() const
+{
+    return dataDir() + QStringLiteral("/pdforganizer.db");
 }

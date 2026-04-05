@@ -6,7 +6,6 @@ class QLineEdit;
 class QToolBar;
 class QLabel;
 class QSplitter;
-class QDockWidget;
 class QAction;
 
 class PdfModel;
@@ -31,12 +30,11 @@ class RecentView;
  * ──────
  *  ┌─[MenuBar]───────────────────────────────────────────────────────────┐
  *  ├─[ToolBar: search | List/Grid toggle | Tag Mgr | Settings]───────────┤
- *  │ ┌──[FolderPanel]──┬──[StackedWidget: ListView | GridView]──────────┐ │
- *  │ │  Folders        │                                                 │ │
- *  │ │  Tag filters    │   PDF cards / rows                              │ │
- *  │ │                 │                                                 │ │
- *  │ └─────────────────┴─────────────────────────────────────────────────┘ │
- *  ├─[Dock: RecentView]──────────────────────────────────────────────────┤
+ *  │ ┌──[FolderPanel]──┬──[StackedWidget:  ├──[RecentView]──────────┐ │
+ *  │ │  Folders        │   ListView |      │  Recently Opened       │ │
+ *  │ │  Tag filters    │   GridView]       │  Card-based panel      │ │
+ *  │ │                 │   PDF cards/rows  │                        │ │
+ *  │ └─────────────────┴───────────────────┴────────────────────────┘ │
  *  └─[StatusBar: count | scan status]───────────────────────────────────┘
  */
 class MainWindow : public QMainWindow
@@ -81,10 +79,10 @@ private:
     void initToolBar();
     void initMenuBar();
     void initStatusBar();
-    void initDockWidgets();
     void connectSignals();
     void restoreLayout();
     void saveLayout();
+    QString dataDir() const;
     QString dbPath() const;
 
     // ── Models ────────────────────────────────────────────────────────────────
@@ -107,7 +105,6 @@ private:
     ListView*        m_listView    = nullptr;
     GridView*        m_gridView    = nullptr;
     RecentView*      m_recentView  = nullptr;
-    QDockWidget*     m_recentDock  = nullptr;
 
     // ── Toolbar widgets ───────────────────────────────────────────────────────
     QLineEdit*       m_searchEdit  = nullptr;
