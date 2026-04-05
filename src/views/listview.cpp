@@ -8,6 +8,8 @@
 #include <QMenu>
 #include <QKeyEvent>
 #include <QAction>
+#include <QTimer>
+#include <QScrollBar>
 
 ListView::ListView(PdfModel*         model,
                    SearchFilterProxy* proxy,
@@ -22,7 +24,7 @@ ListView::ListView(PdfModel*         model,
 void ListView::buildUi()
 {
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(30, 0, 30, 0);
+    layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
     m_tableView = new QTableView(this);
@@ -40,14 +42,15 @@ void ListView::buildUi()
     m_tableView->setAlternatingRowColors(false);
     m_tableView->setMouseTracking(true);
     m_tableView->setSortingEnabled(true);
+    m_tableView->verticalHeader()->setVisible(false);
+    m_tableView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     // Row height
     m_tableView->verticalHeader()->setDefaultSectionSize(ListDelegate::kRowHeight);
-    m_tableView->verticalHeader()->setVisible(false);
 
     // Column widths
     QHeaderView* hdr = m_tableView->horizontalHeader();
-    hdr->setStretchLastSection(true);
+    hdr->setStretchLastSection(false);
     hdr->setSectionResizeMode(PdfModel::ColFileName,   QHeaderView::Stretch);
     hdr->setSectionResizeMode(PdfModel::ColFolder,     QHeaderView::ResizeToContents);
     hdr->setSectionResizeMode(PdfModel::ColTags,       QHeaderView::ResizeToContents);
@@ -67,6 +70,10 @@ void ListView::buildUi()
     connect(m_tableView, &QTableView::activated, this, &ListView::onActivated);
     connect(m_tableView, &QTableView::doubleClicked, this, &ListView::onActivated);
 
+    // Request thumbnails as the user scrolls
+    connect(m_tableView->verticalScrollBar(), &QScrollBar::valueChanged,
+            this, &ListView::requestVisibleThumbnails);
+
     // Auto-load visible rows when proxy model changes (folder filter, search, etc)
     connect(m_proxy, &SearchFilterProxy::layoutChanged,
             this, &ListView::onProxyModelChanged);
@@ -84,8 +91,31 @@ void ListView::scrollToTop()
 void ListView::onProxyModelChanged()
 {
     // When the proxy model changes (folder filter, search, etc),
-    // scroll to top to show the filtered results
-    m_tableView->scrollToTop();
+    // scroll to top to show the filtered results and request thumbnails.
+    // Use a timer to ensure the view is properly laid out first.
+    QTimer::singleShot(0, this, [this]() {
+        m_tableView->scrollToTop();
+        requestVisibleThumbnails();
+    });
+}
+
+void ListView::requestVisibleThumbnails()
+{
+    // Emit thumbnailNeeded for every visible row to pre-cache them
+    const QRect viewport = m_tableView->viewport()->rect();
+    const QModelIndex firstIdx = m_tableView->indexAt(viewport.topLeft());
+    const QModelIndex lastIdx = m_tableView->indexAt(viewport.bottomRight());
+
+    int firstRow = firstIdx.isValid() ? firstIdx.row() : 0;
+    int lastRow = lastIdx.isValid() ? lastIdx.row() : m_proxy->rowCount() - 1;
+
+    for (int row = firstRow; row <= lastRow; ++row) {
+        const QModelIndex proxyIdx = m_proxy->index(row, 0);
+        const QModelIndex srcIdx = m_proxy->mapToSource(proxyIdx);
+        const QString path = m_model->data(srcIdx, PdfModel::FilePathRole).toString();
+        if (!path.isEmpty())
+            emit thumbnailNeeded(path);
+    }
 }
 
 void ListView::onActivated(const QModelIndex& proxyIndex)

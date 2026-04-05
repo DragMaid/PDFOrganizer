@@ -7,6 +7,7 @@
 #include <QMenu>
 #include <QScrollBar>
 #include <QAction>
+#include <QTimer>
 
 GridView::GridView(PdfModel*         model,
                    SearchFilterProxy* proxy,
@@ -111,9 +112,10 @@ void GridView::onViewScrolled()
 void GridView::onProxyModelChanged()
 {
     // When the proxy model changes (folder filter, search, etc),
-    // scroll to top and reload visible thumbnails
+    // scroll to top and reload visible thumbnails.
+    // Use a timer to ensure the view is properly laid out first.
     m_listView->scrollToTop();
-    requestVisibleThumbnails();
+    QTimer::singleShot(0, this, &GridView::requestVisibleThumbnails);
 }
 
 void GridView::requestVisibleThumbnails()

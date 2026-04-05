@@ -61,18 +61,19 @@ void FolderPanel::buildUi()
     fhLayout->addStretch();
     fhLayout->addWidget(addBtn);
 
+    // This thing is kinda annoying to look at so will remove it for now
     // "All" entry at top of folder list
-    auto* allItem = new QPushButton(QStringLiteral("  All PDFs"));
-    allItem->setObjectName(QStringLiteral("allItem"));
-    allItem->setFlat(true);
-    allItem->setCheckable(true);
-    allItem->setChecked(true);
-    allItem->setStyleSheet(QStringLiteral(
-        "QPushButton { text-align: left; padding: 6px 12px; color: #e0e3e8; }"
-        "QPushButton:checked { background: #2b4060; border-radius: 4px; }"
-    ));
-    connect(allItem, &QPushButton::clicked, this,
-            [this]() { emit folderSelected(QString{}); });
+    //auto* allItem = new QPushButton(QStringLiteral("  All PDFs"));
+    //allItem->setObjectName(QStringLiteral("allItem"));
+    //allItem->setFlat(true);
+    //allItem->setCheckable(true);
+    //allItem->setChecked(true);
+    //allItem->setStyleSheet(QStringLiteral(
+        //"QPushButton { text-align: left; padding: 6px 12px; color: #e0e3e8; }"
+        //"QPushButton:checked { background: #2b4060; border-radius: 4px; }"
+    //));
+    //connect(allItem, &QPushButton::clicked, this,
+            //[this]() { emit folderSelected(QString{}); });
 
     m_folderTree = new QTreeView;
     m_folderTree->setModel(m_folderTreeModel);
@@ -114,7 +115,7 @@ void FolderPanel::buildUi()
 
     // ── Assemble ──────────────────────────────────────────────────────────────
     root->addWidget(folderHeader);
-    root->addWidget(allItem);
+    //root->addWidget(allItem);
     root->addWidget(m_folderTree, 3);       // Folder tree gets 3x the space
     root->addWidget(tagHeader);
     root->addWidget(tagScroll, 1);          // Tags get 1x the space

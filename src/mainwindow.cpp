@@ -279,6 +279,8 @@ void MainWindow::connectSignals()
             this, &MainWindow::onFileActivated);
     connect(m_listView, &ListView::editTagsRequested,
             this, &MainWindow::onEditTagsRequested);
+    connect(m_listView, &ListView::thumbnailNeeded,
+            m_pdfCtrl, &PdfController::requestThumbnail);
 
     // Grid view
     connect(m_gridView, &GridView::fileActivated,

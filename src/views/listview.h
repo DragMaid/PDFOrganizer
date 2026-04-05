@@ -31,6 +31,9 @@ signals:
     /// User wants to assign/edit tags for this file.
     void editTagsRequested(const QString& filePath);
 
+    /// Request thumbnail for a file (for caching when switching to grid view).
+    void thumbnailNeeded(const QString& filePath);
+
 private slots:
     void onActivated   (const QModelIndex& proxyIndex);
     void showContextMenu(const QPoint& pos);
@@ -38,6 +41,7 @@ private slots:
 
 private:
     void buildUi();
+    void requestVisibleThumbnails();
 
     PdfModel*         m_model;
     SearchFilterProxy* m_proxy;
