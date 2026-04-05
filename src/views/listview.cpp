@@ -47,7 +47,7 @@ void ListView::buildUi()
 
     // Column widths
     QHeaderView* hdr = m_tableView->horizontalHeader();
-    hdr->setStretchLastSection(false);
+    hdr->setStretchLastSection(true);
     hdr->setSectionResizeMode(PdfModel::ColFileName,   QHeaderView::Stretch);
     hdr->setSectionResizeMode(PdfModel::ColFolder,     QHeaderView::ResizeToContents);
     hdr->setSectionResizeMode(PdfModel::ColTags,       QHeaderView::ResizeToContents);
@@ -67,11 +67,24 @@ void ListView::buildUi()
     connect(m_tableView, &QTableView::activated, this, &ListView::onActivated);
     connect(m_tableView, &QTableView::doubleClicked, this, &ListView::onActivated);
 
+    // Auto-load visible rows when proxy model changes (folder filter, search, etc)
+    connect(m_proxy, &SearchFilterProxy::layoutChanged,
+            this, &ListView::onProxyModelChanged);
+    connect(m_proxy, &SearchFilterProxy::modelReset,
+            this, &ListView::onProxyModelChanged);
+
     layout->addWidget(m_tableView);
 }
 
 void ListView::scrollToTop()
 {
+    m_tableView->scrollToTop();
+}
+
+void ListView::onProxyModelChanged()
+{
+    // When the proxy model changes (folder filter, search, etc),
+    // scroll to top to show the filtered results
     m_tableView->scrollToTop();
 }
 

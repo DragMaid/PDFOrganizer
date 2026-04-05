@@ -34,6 +34,7 @@ signals:
 private slots:
     void onActivated   (const QModelIndex& proxyIndex);
     void showContextMenu(const QPoint& pos);
+    void onProxyModelChanged();
 
 private:
     void buildUi();
