@@ -3,21 +3,27 @@
 #include <QList>
 #include "models/pdffile.h"
 
-class QListWidget;
-class QListWidgetItem;
+class QScrollArea;
+class QVBoxLayout;
 class PdfModel;
 
 /**
- * @brief Shows the N most recently opened PDFs as a quick-access panel.
+ * @brief Shows the N most recently opened PDFs as a polished card-based panel.
  *
- * Sorted descending by lastOpened timestamp.  Clicking an item opens the PDF.
+ * Sorted descending by lastOpened timestamp. Features:
+ * - Card-based layout with thumbnails
+ * - Hover effects for interactivity
+ * - Clean typography and spacing
+ * - Collapsible header with item count
  */
 class RecentView : public QWidget
 {
     Q_OBJECT
 
 public:
-    static constexpr int kMaxItems = 20;
+    static constexpr int kMaxItems = 15;
+    static constexpr int kCardHeight = 80;
+    static constexpr int kCardSpacing = 8;
 
     explicit RecentView(PdfModel* model, QWidget* parent = nullptr);
 
@@ -28,11 +34,16 @@ signals:
     void fileActivated(const QString& filePath);
 
 private slots:
-    void onItemActivated(QListWidgetItem* item);
+    void onToggleExpanded();
 
 private:
     void buildUi();
+    void buildCards();
+    void createCard(const PdfFile& file);
 
     PdfModel*    m_model     = nullptr;
-    QListWidget* m_listWidget = nullptr;
+    QScrollArea* m_scrollArea = nullptr;
+    QVBoxLayout* m_cardsLayout = nullptr;
+    bool         m_isExpanded = true;
+    int          m_itemCount = 0;
 };
