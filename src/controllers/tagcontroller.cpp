@@ -1,0 +1,116 @@
+#include "tagcontroller.h"
+#include "models/tagmodel.h"
+#include "models/pdfmodel.h"
+#include "database/databasemanager.h"
+
+TagController::TagController(TagModel*        tagModel,
+                             PdfModel*        pdfModel,
+                             DatabaseManager* db,
+                             QObject*         parent)
+    : QObject(parent)
+    , m_tagModel(tagModel)
+    , m_pdfModel(pdfModel)
+    , m_db(db)
+{}
+
+void TagController::initialize()
+{
+    m_tagModel->resetTags(m_db->loadTags());
+}
+
+// ── Tag CRUD ──────────────────────────────────────────────────────────────────
+
+bool TagController::createTag(const QString& name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty() || m_tagModel->hasTag(trimmed))
+        return false;
+
+    if (!m_db->saveTag(trimmed)) return false;
+    m_tagModel->addTag(trimmed);
+
+    emit tagCreated(trimmed);
+    return true;
+}
+
+bool TagController::deleteTag(const QString& name)
+{
+    if (!m_db->deleteTag(name)) return false;
+    m_tagModel->removeTag(name);
+
+    // Strip the tag from every in-memory PdfFile that carries it
+    const QList<PdfFile> all = m_pdfModel->allFiles();
+    for (PdfFile f : all) {
+        if (f.tags.removeAll(name) > 0)
+            m_pdfModel->updateFile(f);
+    }
+
+    emit tagDeleted(name);
+    return true;
+}
+
+bool TagController::renameTag(const QString& oldName, const QString& newName)
+{
+    const QString trimmed = newName.trimmed();
+    if (trimmed.isEmpty() || m_tagModel->hasTag(trimmed)) return false;
+
+    if (!m_db->renameTag(oldName, trimmed)) return false;
+    m_tagModel->renameTag(oldName, trimmed);
+
+    // Update the in-memory tag strings in each PdfFile
+    const QList<PdfFile> all = m_pdfModel->allFiles();
+    for (PdfFile f : all) {
+        const int idx = f.tags.indexOf(oldName);
+        if (idx >= 0) {
+            f.tags[idx] = trimmed;
+            m_pdfModel->updateFile(f);
+        }
+    }
+
+    emit tagRenamed(oldName, trimmed);
+    return true;
+}
+
+// ── Tag assignment ────────────────────────────────────────────────────────────
+
+bool TagController::setFileTags(const QString& filePath, const QStringList& tags)
+{
+    PdfFile f = m_pdfModel->fileByPath(filePath);
+    if (!f.isValid() || f.id < 0) return false;
+
+    // Ensure every new tag exists in the global tag table
+    for (const QString& t : tags)
+        if (!m_tagModel->hasTag(t))
+            createTag(t);
+
+    if (!m_db->setFileTags(f.id, tags)) return false;
+
+    f.tags = tags;
+    m_pdfModel->updateFile(f);
+
+    emit fileTagsChanged(filePath, tags);
+    return true;
+}
+
+bool TagController::addTagToFile(const QString& filePath, const QString& tag)
+{
+    PdfFile f = m_pdfModel->fileByPath(filePath);
+    if (!f.isValid() || f.hasTag(tag)) return false;
+
+    if (!m_tagModel->hasTag(tag))
+        createTag(tag);
+
+    QStringList updated = f.tags;
+    updated.append(tag);
+    return setFileTags(filePath, updated);
+}
+
+bool TagController::removeTagFromFile(const QString& filePath, const QString& tag)
+{
+    PdfFile f = m_pdfModel->fileByPath(filePath);
+    if (!f.isValid() || !f.hasTag(tag)) return false;
+
+    QStringList updated = f.tags;
+    updated.removeAll(tag);
+    return setFileTags(filePath, updated);
+}
