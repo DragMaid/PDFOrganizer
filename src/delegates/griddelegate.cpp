@@ -80,13 +80,9 @@ void GridDelegate::drawThumbnail(QPainter* p,
                                   const QRect& thumbRect,
                                   const QPixmap& pix) const
 {
-    // Clip to rounded top corners
+    // Clip to rounded corners
     QPainterPath clip;
     clip.addRoundedRect(thumbRect, kCornerRadius, kCornerRadius);
-    // Only round the top: subtract a rect covering the bottom half
-    QRectF bottom(thumbRect.left(), thumbRect.center().y(),
-                  thumbRect.width(), thumbRect.height() / 2.0 + 1);
-    clip.addRect(bottom);
     p->setClipPath(clip);
 
     if (!pix.isNull()) {
