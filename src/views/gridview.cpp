@@ -21,7 +21,7 @@ GridView::GridView(PdfModel*         model,
 void GridView::buildUi()
 {
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setContentsMargins(30, 10, 30, 10);
 
     m_listView = new QListView(this);
     m_delegate = new GridDelegate(this);

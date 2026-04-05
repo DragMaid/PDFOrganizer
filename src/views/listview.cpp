@@ -22,7 +22,7 @@ ListView::ListView(PdfModel*         model,
 void ListView::buildUi()
 {
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setContentsMargins(30, 0, 30, 0);
     layout->setSpacing(0);
 
     m_tableView = new QTableView(this);
