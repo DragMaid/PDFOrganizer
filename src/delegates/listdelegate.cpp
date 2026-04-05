@@ -19,6 +19,13 @@ void ListDelegate::paint(QPainter* painter,
                           const QStyleOptionViewItem& option,
                           const QModelIndex& index) const
 {
+    // Only draw the complex layout with icon for the filename column
+    if (index.column() != PdfModel::ColFileName) {
+        // For other columns, use default delegate painting
+        QStyledItemDelegate::paint(painter, option, index);
+        return;
+    }
+
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
     painter->setRenderHint(QPainter::SmoothPixmapTransform);
