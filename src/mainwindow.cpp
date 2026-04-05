@@ -91,9 +91,10 @@ MainWindow::~MainWindow()
 
 void MainWindow::initModels()
 {
-    m_pdfModel    = new PdfModel   (this);
-    m_tagModel    = new TagModel   (this);
-    m_folderModel = new FolderModel(this);
+    m_pdfModel        = new PdfModel   (this);
+    m_tagModel        = new TagModel   (this);
+    m_folderModel     = new FolderModel(this);
+    m_folderTreeModel = new FolderTreeModel(this);
 
     m_proxy = new SearchFilterProxy(this);
     m_proxy->setSourceModel(m_pdfModel);
@@ -118,7 +119,7 @@ void MainWindow::initViews()
 {
     // ── Central splitter ──────────────────────────────────────────────────────
     m_splitter    = new QSplitter(Qt::Horizontal, this);
-    m_folderPanel = new FolderPanel(m_folderModel, m_tagModel, m_splitter);
+    m_folderPanel = new FolderPanel(m_folderTreeModel, m_tagModel, m_splitter);
 
     m_viewStack   = new QStackedWidget(m_splitter);
     m_listView    = new ListView(m_pdfModel, m_proxy, m_viewStack);
@@ -316,6 +317,10 @@ void MainWindow::connectSignals()
     // Folder model ↔ watcher
     connect(m_folderModel, &FolderModel::folderAdded, m_watcher, &FolderWatcher::addRootFolder);
     connect(m_folderModel, &FolderModel::folderRemoved, m_watcher, &FolderWatcher::removeRootFolder);
+
+    // Folder model ↔ tree model (for sidebar hierarchy display)
+    connect(m_folderModel, &FolderModel::folderAdded, m_folderTreeModel, &FolderTreeModel::addRootFolder);
+    connect(m_folderModel, &FolderModel::folderRemoved, m_folderTreeModel, &FolderTreeModel::removeRootFolder);
 
     // Tag model changes → refresh folder panel chips
     connect(m_tagModel, &QAbstractItemModel::modelReset,   m_folderPanel, &FolderPanel::refresh);

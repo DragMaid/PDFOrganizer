@@ -2,19 +2,19 @@
 #include <QWidget>
 #include <QStringList>
 
-class QListView;
+class QTreeView;
 class QListWidget;
 class QLabel;
 class QPushButton;
 class QLineEdit;
-class FolderModel;
+class FolderTreeModel;
 class TagModel;
 
 /**
  * @brief Left-side panel: root folder list and tag filter chips.
  *
  * Signals emitted upward to MainWindow:
- *  folderSelected  – user clicked a root folder (filter by folder)
+ *  folderSelected  – user clicked a folder in the tree (filter by folder)
  *  tagsSelected    – user toggled tag filter chips
  *  addFolderRequested – "+" button clicked
  *  removeFolderRequested – "-" button or context menu on folder
@@ -24,9 +24,9 @@ class FolderPanel : public QWidget
     Q_OBJECT
 
 public:
-    explicit FolderPanel(FolderModel* folderModel,
-                         TagModel*    tagModel,
-                         QWidget*     parent = nullptr);
+    explicit FolderPanel(FolderTreeModel* folderTreeModel,
+                         TagModel*        tagModel,
+                         QWidget*         parent = nullptr);
 
     void refresh();   ///< Re-draw tag chips from TagModel
 
@@ -49,10 +49,10 @@ private:
     void buildTagChips();
     QWidget* makeTagChip(const QString& tag);
 
-    FolderModel* m_folderModel;
-    TagModel*    m_tagModel;
+    FolderTreeModel* m_folderTreeModel;
+    TagModel*        m_tagModel;
 
-    QListView*    m_folderList   = nullptr;
+    QTreeView*    m_folderTree   = nullptr;
     QWidget*      m_tagContainer = nullptr;
     QStringList   m_activeTags;
 };

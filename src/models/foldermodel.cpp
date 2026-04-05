@@ -1,6 +1,9 @@
 #include "foldermodel.h"
 #include <QDir>
 #include <QFont>
+#include <QDirIterator>
+#include <QFileInfo>
+#include <functional>
 
 FolderModel::FolderModel(QObject* parent)
     : QAbstractListModel(parent)
@@ -63,4 +66,181 @@ bool FolderModel::removeFolder(const QString& path)
 bool FolderModel::hasFolder(const QString& path) const
 {
     return m_folders.contains(path);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// FolderTreeModel Implementation
+// ────────────────────────────────────────────────────────────────────────────
+
+FolderTreeModel::FolderTreeModel(QObject* parent)
+    : QAbstractItemModel(parent)
+{}
+
+FolderTreeModel::~FolderTreeModel()
+{
+    clearTree();
+}
+
+int FolderTreeModel::rowCount(const QModelIndex& parent) const
+{
+    if (!parent.isValid()) {
+        return m_roots.size();
+    }
+
+    const FolderNode* node = nodeFromIndex(parent);
+    return node ? node->children.size() : 0;
+}
+
+int FolderTreeModel::columnCount(const QModelIndex&) const
+{
+    return 1;
+}
+
+QVariant FolderTreeModel::data(const QModelIndex& index, int role) const
+{
+    if (!index.isValid()) return {};
+
+    const FolderNode* node = nodeFromIndex(index);
+    if (!node) return {};
+
+    switch (role) {
+    case Qt::DisplayRole:
+    case Qt::EditRole:
+        return node->name;
+    case Qt::ToolTipRole:
+        return node->absolutePath;
+    case Qt::UserRole:
+        return node->absolutePath;  // for programmatic access
+    }
+    return {};
+}
+
+QModelIndex FolderTreeModel::index(int row, int column, const QModelIndex& parent) const
+{
+    if (column < 0 || column >= columnCount(parent)) return {};
+
+    FolderNode* parentNode = nullptr;
+    if (!parent.isValid()) {
+        if (row >= m_roots.size()) return {};
+        parentNode = nullptr;
+    } else {
+        parentNode = nodeFromIndex(parent);
+        if (!parentNode || row >= parentNode->children.size()) return {};
+    }
+
+    FolderNode* childNode = parent.isValid()
+        ? parentNode->children.at(row)
+        : m_roots.at(row);
+    return createIndex(row, column, childNode);
+}
+
+QModelIndex FolderTreeModel::parent(const QModelIndex& index) const
+{
+    if (!index.isValid()) return {};
+
+    const FolderNode* node = static_cast<FolderNode*>(index.internalPointer());
+    if (!node || !node->parent) return {};
+
+    const FolderNode* grandparent = node->parent->parent;
+    int row = 0;
+
+    if (grandparent) {
+        row = grandparent->children.indexOf(node->parent);
+    } else {
+        row = m_roots.indexOf(node->parent);
+    }
+
+    if (row < 0) return {};
+    return createIndex(row, 0, node->parent);
+}
+
+bool FolderTreeModel::addRootFolder(const QString& path)
+{
+    if (path.isEmpty()) return false;
+
+    // Check if already exists
+    for (const FolderNode* root : m_roots) {
+        if (root->absolutePath == path) return false;
+    }
+
+    const int row = m_roots.size();
+    beginInsertRows({}, row, row);
+
+    FolderNode* root = new FolderNode();
+    QFileInfo info(path);
+    root->name = info.fileName();
+    root->absolutePath = path;
+    root->parent = nullptr;
+
+    buildTreeForRoot(root, path);
+    m_roots.append(root);
+
+    endInsertRows();
+    emit folderAdded(path);
+    return true;
+}
+
+bool FolderTreeModel::removeRootFolder(const QString& path)
+{
+    int row = 0;
+    for (FolderNode* root : m_roots) {
+        if (root->absolutePath == path) {
+            beginRemoveRows({}, row, row);
+            m_roots.removeAt(row);
+            delete root;
+            endRemoveRows();
+            emit folderRemoved(path);
+            return true;
+        }
+        ++row;
+    }
+    return false;
+}
+
+QString FolderTreeModel::folderPathForIndex(const QModelIndex& index) const
+{
+    const FolderNode* node = nodeFromIndex(index);
+    return node ? node->absolutePath : QString();
+}
+
+void FolderTreeModel::buildTreeForRoot(FolderNode* root, const QString& rootPath)
+{
+    QDir dir(rootPath);
+    dir.setFilter(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Readable);
+
+    for (const QString& subfolderName : dir.entryList()) {
+        const QString subfolderPath = dir.filePath(subfolderName);
+        FolderNode* child = new FolderNode();
+        child->name = subfolderName;
+        child->absolutePath = subfolderPath;
+        child->parent = root;
+
+        // Recursively build subtree
+        buildTreeForRoot(child, subfolderPath);
+
+        root->children.append(child);
+    }
+}
+
+void FolderTreeModel::clearTree()
+{
+    beginResetModel();
+    for (FolderNode* root : m_roots) {
+        // Recursive delete
+        std::function<void(FolderNode*)> deleteNode = [&](FolderNode* node) {
+            for (FolderNode* child : node->children) {
+                deleteNode(child);
+            }
+            delete node;
+        };
+        deleteNode(root);
+    }
+    m_roots.clear();
+    endResetModel();
+}
+
+FolderTreeModel::FolderNode* FolderTreeModel::nodeFromIndex(const QModelIndex& index) const
+{
+    if (!index.isValid()) return nullptr;
+    return static_cast<FolderNode*>(index.internalPointer());
 }

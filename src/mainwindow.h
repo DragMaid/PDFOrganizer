@@ -12,6 +12,7 @@ class QAction;
 class PdfModel;
 class TagModel;
 class FolderModel;
+class FolderTreeModel;
 class DatabaseManager;
 class FolderWatcher;
 class PdfController;
@@ -87,10 +88,11 @@ private:
     QString dbPath() const;
 
     // ── Models ────────────────────────────────────────────────────────────────
-    PdfModel*        m_pdfModel    = nullptr;
-    TagModel*        m_tagModel    = nullptr;
-    FolderModel*     m_folderModel = nullptr;
-    SearchFilterProxy* m_proxy     = nullptr;
+    PdfModel*        m_pdfModel      = nullptr;
+    TagModel*        m_tagModel      = nullptr;
+    FolderModel*     m_folderModel   = nullptr;
+    FolderTreeModel* m_folderTreeModel = nullptr;
+    SearchFilterProxy* m_proxy       = nullptr;
 
     // ── Infrastructure ────────────────────────────────────────────────────────
     DatabaseManager* m_db          = nullptr;

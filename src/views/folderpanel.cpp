@@ -3,7 +3,7 @@
 #include "models/tagmodel.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QListView>
+#include <QTreeView>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
@@ -16,13 +16,13 @@
 #include <QMenu>
 #include <QContextMenuEvent>
 #include <QCheckBox>
-#include <QLayout> 
+#include <QLayout>
 
-FolderPanel::FolderPanel(FolderModel* folderModel,
-                         TagModel*    tagModel,
-                         QWidget*     parent)
+FolderPanel::FolderPanel(FolderTreeModel* folderTreeModel,
+                         TagModel*        tagModel,
+                         QWidget*         parent)
     : QWidget(parent)
-    , m_folderModel(folderModel)
+    , m_folderTreeModel(folderTreeModel)
     , m_tagModel(tagModel)
 {
     setAcceptDrops(true);
@@ -74,23 +74,25 @@ void FolderPanel::buildUi()
     connect(allItem, &QPushButton::clicked, this,
             [this]() { emit folderSelected(QString{}); });
 
-    m_folderList = new QListView;
-    m_folderList->setModel(m_folderModel);
-    m_folderList->setFrameShape(QFrame::NoFrame);
-    m_folderList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_folderList->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_folderList->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_folderTree = new QTreeView;
+    m_folderTree->setModel(m_folderTreeModel);
+    m_folderTree->setFrameShape(QFrame::NoFrame);
+    m_folderTree->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_folderTree->setHeaderHidden(true);
+    m_folderTree->setExpandsOnDoubleClick(true);
+    m_folderTree->setAnimated(true);
+    m_folderTree->setContextMenuPolicy(Qt::CustomContextMenu);
 
-    connect(m_folderList, &QListView::clicked, this, &FolderPanel::onFolderClicked);
-    connect(m_folderList, &QListView::customContextMenuRequested, this,
+    connect(m_folderTree, &QTreeView::clicked, this, &FolderPanel::onFolderClicked);
+    connect(m_folderTree, &QTreeView::customContextMenuRequested, this,
             [this](const QPoint& pos) {
-                const QModelIndex idx = m_folderList->indexAt(pos);
+                const QModelIndex idx = m_folderTree->indexAt(pos);
                 if (!idx.isValid()) return;
                 const QString path = idx.data(Qt::UserRole).toString();
 
                 QMenu menu(this);
                 QAction* removeAct = menu.addAction(QStringLiteral("Remove Folder"));
-                if (menu.exec(m_folderList->viewport()->mapToGlobal(pos)) == removeAct)
+                if (menu.exec(m_folderTree->viewport()->mapToGlobal(pos)) == removeAct)
                     emit removeFolderRequested(path);
             });
 
@@ -113,9 +115,9 @@ void FolderPanel::buildUi()
     // ── Assemble ──────────────────────────────────────────────────────────────
     root->addWidget(folderHeader);
     root->addWidget(allItem);
-    root->addWidget(m_folderList);
+    root->addWidget(m_folderTree, 3);       // Folder tree gets 3x the space
     root->addWidget(tagHeader);
-    root->addWidget(tagScroll, 1);
+    root->addWidget(tagScroll, 1);          // Tags get 1x the space
 
     buildTagChips();
 }

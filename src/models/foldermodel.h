@@ -1,5 +1,6 @@
 #pragma once
 #include <QAbstractListModel>
+#include <QAbstractItemModel>
 #include <QStringList>
 
 /**
@@ -31,4 +32,50 @@ signals:
 
 private:
     QStringList m_folders;
+};
+
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * @brief Hierarchical model of folder structure with subfolders.
+ *
+ * Displays folders as a tree: root folders at top level, with subfolders
+ * nested beneath. Used by FolderPanel to display folder hierarchy.
+ */
+class FolderTreeModel : public QAbstractItemModel
+{
+    Q_OBJECT
+
+public:
+    explicit FolderTreeModel(QObject* parent = nullptr);
+    ~FolderTreeModel();
+
+    int      rowCount   (const QModelIndex& parent = {}) const override;
+    int      columnCount(const QModelIndex& parent = {}) const override;
+    QVariant data       (const QModelIndex& index, int role = Qt::DisplayRole) const override;
+    QModelIndex index   (int row, int column, const QModelIndex& parent = {}) const override;
+    QModelIndex parent  (const QModelIndex& index) const override;
+
+    bool addRootFolder   (const QString& path);
+    bool removeRootFolder(const QString& path);
+
+    [[nodiscard]] QString folderPathForIndex(const QModelIndex& index) const;
+
+signals:
+    void folderAdded  (const QString& path);
+    void folderRemoved(const QString& path);
+
+private:
+    struct FolderNode {
+        QString name;           // directory name only
+        QString absolutePath;   // full path
+        QList<FolderNode*> children;
+        FolderNode* parent = nullptr;
+    };
+
+    void buildTreeForRoot(FolderNode* root, const QString& rootPath);
+    void clearTree();
+    FolderNode* nodeFromIndex(const QModelIndex& index) const;
+
+    QList<FolderNode*> m_roots;
 };
