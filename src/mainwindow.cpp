@@ -51,15 +51,67 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QPushButton>
+#include <QCryptographicHash>
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QTabWidget>
 #include <QTextEdit>
 #include <QUrl>
+#include <QUrlQuery>
+
+static QString groupSlug(QString name)
+{
+    name = name.toLower();
+    name.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")), QStringLiteral("-"));
+    name = name.trimmed();
+    while (name.startsWith(QLatin1Char('-'))) name.remove(0, 1);
+    while (name.endsWith(QLatin1Char('-'))) name.chop(1);
+    return name.isEmpty() ? QStringLiteral("group") : name;
+}
+
+static bool githubRepoParts(const QString& repoUrl, QString* owner, QString* repo)
+{
+    const QRegularExpression re(QStringLiteral("^https://github\\.com/([^/]+)/([^/.]+)(?:\\.git)?/?$"));
+    const QRegularExpressionMatch match = re.match(repoUrl.trimmed());
+    if (!match.hasMatch()) return false;
+    *owner = match.captured(1);
+    *repo = match.captured(2);
+    return true;
+}
+
+static QNetworkReply* blockingGet(QNetworkAccessManager& nam, const QNetworkRequest& req)
+{
+    QNetworkReply* reply = nam.get(req);
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    return reply;
+}
+
+static QNetworkReply* blockingPut(QNetworkAccessManager& nam, const QNetworkRequest& req, const QByteArray& body)
+{
+    QNetworkReply* reply = nam.put(req, body);
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    return reply;
+}
+
+static QNetworkReply* blockingPost(QNetworkAccessManager& nam, const QNetworkRequest& req, const QByteArray& body)
+{
+    QNetworkReply* reply = nam.post(req, body);
+    QEventLoop loop;
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    return reply;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Construction
@@ -524,22 +576,19 @@ void MainWindow::onValidateGithub()
                                             current, &ok).trimmed();
     if (!ok || repoUrl.isEmpty()) return;
 
-    const QRegularExpression re(QStringLiteral("^https://github\\.com/([^/]+)/([^/.]+)(?:\\.git)?/?$"));
-    const QRegularExpressionMatch match = re.match(repoUrl);
-    if (!match.hasMatch()) {
+    QString owner;
+    QString repo;
+    if (!githubRepoParts(repoUrl, &owner, &repo)) {
         QMessageBox::warning(this, QStringLiteral("Invalid Repo"),
                              QStringLiteral("Use https://github.com/owner/repo."));
         return;
     }
 
     QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/%1/%2")
-                         .arg(match.captured(1), match.captured(2))));
+                         .arg(owner, repo)));
     req.setRawHeader("User-Agent", "PDFOrganizer");
     QNetworkAccessManager nam;
-    QNetworkReply* reply = nam.get(req);
-    QEventLoop loop;
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
+    QNetworkReply* reply = blockingGet(nam, req);
 
     const bool valid = reply->error() == QNetworkReply::NoError;
     reply->deleteLater();
@@ -561,29 +610,29 @@ void MainWindow::onValidateB2()
     QDialog dlg(this);
     dlg.setWindowTitle(QStringLiteral("Backblaze B2"));
     auto* form = new QFormLayout(&dlg);
-    QLineEdit keyId;
-    QLineEdit appKey;
-    QLineEdit bucket;
-    appKey.setEchoMode(QLineEdit::Password);
-    form->addRow(QStringLiteral("Key ID:"), &keyId);
-    form->addRow(QStringLiteral("App key:"), &appKey);
-    form->addRow(QStringLiteral("Bucket:"), &bucket);
+    QLineEdit apiUrl;
+    QLineEdit bucketId;
+    QLineEdit authToken;
+    apiUrl.setText(QStringLiteral("https://api.backblazeb2.com"));
+    authToken.setEchoMode(QLineEdit::Password);
+    form->addRow(QStringLiteral("API URL:"), &apiUrl);
+    form->addRow(QStringLiteral("Bucket ID:"), &bucketId);
+    form->addRow(QStringLiteral("Auth token:"), &authToken);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
     form->addRow(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     if (dlg.exec() != QDialog::Accepted) return;
 
-    QNetworkRequest req(QUrl(QStringLiteral("https://api.backblazeb2.com/b2api/v4/b2_authorize_account")));
-    const QByteArray basic = (keyId.text().trimmed() + QLatin1Char(':') + appKey.text()).toUtf8().toBase64();
-    req.setRawHeader("Authorization", "Basic " + basic);
+    QUrl url(apiUrl.text().trimmed() + QStringLiteral("/b2api/v4/b2_get_upload_url"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("bucketId"), bucketId.text().trimmed());
+    url.setQuery(query);
+    QNetworkRequest req(url);
+    req.setRawHeader("Authorization", authToken.text().trimmed().toUtf8());
     QNetworkAccessManager nam;
-    QNetworkReply* reply = nam.get(req);
-    QEventLoop loop;
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
+    QNetworkReply* reply = blockingGet(nam, req);
 
-    const QByteArray body = reply->readAll();
     const bool valid = reply->error() == QNetworkReply::NoError;
     reply->deleteLater();
     if (!valid) {
@@ -592,9 +641,199 @@ void MainWindow::onValidateB2()
         return;
     }
 
-    const QString accountId = QJsonDocument::fromJson(body).object().value(QStringLiteral("accountId")).toString();
-    m_db->saveGroupB2Validation(groupId, keyId.text(), bucket.text(), accountId, QStringLiteral("valid"));
+    m_db->saveGroupB2Validation(groupId, QString{}, bucketId.text(), QString{}, QStringLiteral("valid"));
     refreshDetailPane();
+}
+
+void MainWindow::onSyncGroup()
+{
+    const int groupId = selectedGroupId();
+    if (groupId < 0) return;
+
+    const FileGroup group = m_db->groupById(groupId);
+    QList<PdfFile> files;
+    for (const PdfFile& f : m_pdfModel->allFiles()) {
+        if (m_db->fileGroupIds(f.id).contains(groupId))
+            files.append(f);
+    }
+    if (files.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("Nothing To Sync"),
+                                 QStringLiteral("This group has no files."));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Sync Group"));
+    auto* form = new QFormLayout(&dlg);
+    QLineEdit repoUrl;
+    QLineEdit githubToken;
+    QLineEdit b2ApiUrl;
+    QLineEdit b2BucketId;
+    QLineEdit b2AuthToken;
+    QLineEdit b2Prefix;
+    repoUrl.setText(group.githubRepoUrl);
+    b2ApiUrl.setText(QStringLiteral("https://api.backblazeb2.com"));
+    b2BucketId.setText(group.b2BucketName);
+    b2Prefix.setText(QStringLiteral("pdforganizer/%1").arg(groupSlug(group.name)));
+    githubToken.setEchoMode(QLineEdit::Password);
+    b2AuthToken.setEchoMode(QLineEdit::Password);
+    form->addRow(QStringLiteral("GitHub repo URL:"), &repoUrl);
+    form->addRow(QStringLiteral("GitHub token:"), &githubToken);
+    form->addRow(QStringLiteral("B2 API URL:"), &b2ApiUrl);
+    form->addRow(QStringLiteral("B2 bucket ID:"), &b2BucketId);
+    form->addRow(QStringLiteral("B2 auth token:"), &b2AuthToken);
+    form->addRow(QStringLiteral("B2 prefix:"), &b2Prefix);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QString owner;
+    QString repo;
+    if (!githubRepoParts(repoUrl.text(), &owner, &repo)) {
+        QMessageBox::warning(this, QStringLiteral("Invalid Repo"),
+                             QStringLiteral("Use https://github.com/owner/repo."));
+        return;
+    }
+    if (githubToken.text().trimmed().isEmpty() || b2AuthToken.text().trimmed().isEmpty()
+        || b2BucketId.text().trimmed().isEmpty() || b2ApiUrl.text().trimmed().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("Missing Sync Credentials"),
+                             QStringLiteral("GitHub token, B2 API URL, bucket ID, and B2 auth token are required."));
+        return;
+    }
+
+    QJsonObject metadata;
+    metadata[QStringLiteral("group")] = group.name;
+    metadata[QStringLiteral("syncedAt")] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    QJsonArray filesJson;
+    QJsonArray tagsJson;
+    for (const QString& tag : m_tagModel->allTags())
+        tagsJson.append(tag);
+    for (const PdfFile& f : files) {
+        QJsonObject obj;
+        obj[QStringLiteral("path")] = f.filePath;
+        obj[QStringLiteral("fileName")] = f.fileName;
+        obj[QStringLiteral("fileSize")] = QString::number(f.fileSizeBytes);
+        obj[QStringLiteral("lastModified")] = f.lastModified.toString(Qt::ISODate);
+        QJsonArray fileTags;
+        for (const QString& tag : f.tags) fileTags.append(tag);
+        obj[QStringLiteral("tags")] = fileTags;
+        QJsonArray notes;
+        for (const FileNote& note : m_db->loadNotes(f.id)) {
+            QJsonObject n;
+            n[QStringLiteral("author")] = note.author;
+            n[QStringLiteral("body")] = note.body;
+            n[QStringLiteral("createdAt")] = note.createdAt.toString(Qt::ISODate);
+            notes.append(n);
+        }
+        obj[QStringLiteral("notes")] = notes;
+        filesJson.append(obj);
+    }
+    metadata[QStringLiteral("tags")] = tagsJson;
+    metadata[QStringLiteral("files")] = filesJson;
+
+    QNetworkAccessManager nam;
+    const QString metaPath = QStringLiteral("pdforganizer/groups/%1.json").arg(groupSlug(group.name));
+    const QString contentsUrl = QStringLiteral("https://api.github.com/repos/%1/%2/contents/%3")
+        .arg(owner, repo, metaPath);
+
+    QNetworkRequest getReq{QUrl(contentsUrl)};
+    getReq.setRawHeader("Accept", "application/vnd.github+json");
+    getReq.setRawHeader("Authorization", "Bearer " + githubToken.text().trimmed().toUtf8());
+    getReq.setRawHeader("User-Agent", "PDFOrganizer");
+    QNetworkReply* getReply = blockingGet(nam, getReq);
+    const QByteArray getBody = getReply->readAll();
+    const bool hasExistingMeta = getReply->error() == QNetworkReply::NoError;
+    const int getStatus = getReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    getReply->deleteLater();
+    if (!hasExistingMeta && getStatus != 404) {
+        QMessageBox::warning(this, QStringLiteral("GitHub Sync Failed"),
+                             QStringLiteral("Could not read existing metadata from GitHub."));
+        return;
+    }
+
+    QJsonObject putBody;
+    putBody[QStringLiteral("message")] = QStringLiteral("Sync PDF Organizer metadata for %1").arg(group.name);
+    putBody[QStringLiteral("content")] = QString::fromLatin1(
+        QJsonDocument(metadata).toJson(QJsonDocument::Indented).toBase64());
+    if (hasExistingMeta)
+        putBody[QStringLiteral("sha")] = QJsonDocument::fromJson(getBody).object().value(QStringLiteral("sha")).toString();
+
+    QNetworkRequest putReq{QUrl(contentsUrl)};
+    putReq.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    putReq.setRawHeader("Accept", "application/vnd.github+json");
+    putReq.setRawHeader("Authorization", "Bearer " + githubToken.text().trimmed().toUtf8());
+    putReq.setRawHeader("User-Agent", "PDFOrganizer");
+    QNetworkReply* putReply = blockingPut(nam, putReq, QJsonDocument(putBody).toJson(QJsonDocument::Compact));
+    const bool githubOk = putReply->error() == QNetworkReply::NoError;
+    putReply->deleteLater();
+    if (!githubOk) {
+        QMessageBox::warning(this, QStringLiteral("GitHub Sync Failed"),
+                             QStringLiteral("Could not write metadata. Check token contents-write access."));
+        return;
+    }
+    m_db->saveGroupGithubValidation(groupId, repoUrl.text(), QStringLiteral("synced"));
+
+    QUrl uploadUrl(b2ApiUrl.text().trimmed() + QStringLiteral("/b2api/v4/b2_get_upload_url"));
+    QUrlQuery uploadQuery;
+    uploadQuery.addQueryItem(QStringLiteral("bucketId"), b2BucketId.text().trimmed());
+    uploadUrl.setQuery(uploadQuery);
+    QNetworkRequest uploadUrlReq(uploadUrl);
+    uploadUrlReq.setRawHeader("Authorization", b2AuthToken.text().trimmed().toUtf8());
+    QNetworkReply* uploadUrlReply = blockingGet(nam, uploadUrlReq);
+    const QByteArray uploadUrlBody = uploadUrlReply->readAll();
+    const bool uploadUrlOk = uploadUrlReply->error() == QNetworkReply::NoError;
+    uploadUrlReply->deleteLater();
+    if (!uploadUrlOk) {
+        QMessageBox::warning(this, QStringLiteral("B2 Sync Failed"),
+                             QStringLiteral("Could not get a B2 upload URL from the provided auth token."));
+        return;
+    }
+
+    const QJsonObject uploadInfo = QJsonDocument::fromJson(uploadUrlBody).object();
+    const QUrl fileUploadUrl(uploadInfo.value(QStringLiteral("uploadUrl")).toString());
+    const QByteArray fileUploadToken = uploadInfo.value(QStringLiteral("authorizationToken")).toString().toUtf8();
+    int uploaded = 0;
+    int skipped = 0;
+    for (const PdfFile& f : files) {
+        if (m_db->wasFileUploaded(groupId, f.id, f.fileSizeBytes, f.lastModified)) {
+            ++skipped;
+            continue;
+        }
+
+        QFile file(f.filePath);
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        const QByteArray content = file.readAll(); // ponytail: stream when large PDFs become a problem.
+        const QByteArray sha1 = QCryptographicHash::hash(content, QCryptographicHash::Sha1).toHex();
+        const QString objectName = QStringLiteral("%1/%2-%3")
+            .arg(b2Prefix.text().trimmed(), QString::number(f.id), f.fileName);
+
+        QNetworkRequest uploadReq(fileUploadUrl);
+        uploadReq.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("b2/x-auto"));
+        uploadReq.setHeader(QNetworkRequest::ContentLengthHeader, content.size());
+        uploadReq.setRawHeader("Authorization", fileUploadToken);
+        uploadReq.setRawHeader("X-Bz-File-Name", QUrl::toPercentEncoding(objectName, "/"));
+        uploadReq.setRawHeader("X-Bz-Content-Sha1", sha1);
+        QNetworkReply* uploadReply = blockingPost(nam, uploadReq, content);
+        const QByteArray body = uploadReply->readAll();
+        const bool ok = uploadReply->error() == QNetworkReply::NoError;
+        uploadReply->deleteLater();
+        if (!ok) {
+            QMessageBox::warning(this, QStringLiteral("B2 Sync Failed"),
+                                 QStringLiteral("Upload failed for %1.").arg(f.fileName));
+            return;
+        }
+        const QString b2FileId = QJsonDocument::fromJson(body).object().value(QStringLiteral("fileId")).toString();
+        m_db->markFileUploaded(groupId, f.id, f.fileSizeBytes, f.lastModified, b2FileId);
+        ++uploaded;
+    }
+
+    m_db->saveGroupB2Validation(groupId, QString{}, b2BucketId.text(), QString{}, QStringLiteral("synced"));
+    refreshDetailPane();
+    QMessageBox::information(this, QStringLiteral("Sync Complete"),
+                             QStringLiteral("Metadata pushed. Uploaded %1 file(s), skipped %2 unchanged file(s).")
+                             .arg(uploaded).arg(skipped));
 }
 
 void MainWindow::onSearchTextChanged(const QString& text)
@@ -661,9 +900,11 @@ QWidget* MainWindow::buildDetailPane()
     auto* addGroupBtn = new QPushButton(QStringLiteral("Add Group"), pane);
     m_githubBtn = new QPushButton(QStringLiteral("Validate GitHub"), pane);
     m_b2Btn = new QPushButton(QStringLiteral("Validate B2"), pane);
+    m_syncBtn = new QPushButton(QStringLiteral("Sync Group"), pane);
     groupRow->addWidget(addGroupBtn);
     groupRow->addWidget(m_githubBtn);
     groupRow->addWidget(m_b2Btn);
+    groupRow->addWidget(m_syncBtn);
     root->addLayout(groupRow);
 
     root->addWidget(new QLabel(QStringLiteral("NOTES"), pane));
@@ -686,12 +927,14 @@ QWidget* MainWindow::buildDetailPane()
     connect(addGroupBtn, &QPushButton::clicked, this, &MainWindow::onCreateGroup);
     connect(m_githubBtn, &QPushButton::clicked, this, &MainWindow::onValidateGithub);
     connect(m_b2Btn, &QPushButton::clicked, this, &MainWindow::onValidateB2);
+    connect(m_syncBtn, &QPushButton::clicked, this, &MainWindow::onSyncGroup);
     connect(m_addNoteBtn, &QPushButton::clicked, this, &MainWindow::onAddNote);
     connect(m_groupList, &QListWidget::itemChanged, this, &MainWindow::onGroupItemChanged);
     connect(m_groupList, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* current) {
         const bool enabled = current && !m_selectedFilePath.isEmpty();
         m_githubBtn->setEnabled(enabled);
         m_b2Btn->setEnabled(enabled);
+        m_syncBtn->setEnabled(enabled);
     });
 
     return pane;
@@ -710,6 +953,7 @@ void MainWindow::refreshDetailPane()
     m_addNoteBtn->setEnabled(hasFile);
     m_githubBtn->setEnabled(hasFile && selectedGroupId() >= 0);
     m_b2Btn->setEnabled(hasFile && selectedGroupId() >= 0);
+    m_syncBtn->setEnabled(hasFile && selectedGroupId() >= 0);
 
     {
         const QSignalBlocker blocker(m_groupList);

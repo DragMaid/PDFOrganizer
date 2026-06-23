@@ -73,6 +73,7 @@ private slots:
     void onGroupItemChanged(QListWidgetItem* item);
     void onValidateGithub();
     void onValidateB2();
+    void onSyncGroup();
 
     // ── Search ────────────────────────────────────────────────────────────────
     void onSearchTextChanged(const QString& text);
@@ -129,6 +130,7 @@ private:
     QPushButton*     m_addNoteBtn  = nullptr;
     QPushButton*     m_githubBtn   = nullptr;
     QPushButton*     m_b2Btn       = nullptr;
+    QPushButton*     m_syncBtn     = nullptr;
     QString          m_selectedFilePath;
 
     // ── Toolbar widgets ───────────────────────────────────────────────────────
