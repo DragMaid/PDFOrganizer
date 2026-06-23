@@ -7,6 +7,12 @@ class QToolBar;
 class QLabel;
 class QSplitter;
 class QAction;
+class QListWidget;
+class QListWidgetItem;
+class QPushButton;
+class QTabWidget;
+class QTextEdit;
+class QVBoxLayout;
 
 class PdfModel;
 class TagModel;
@@ -61,6 +67,12 @@ private slots:
     void onFileActivated   (const QString& filePath);
     void onEditTagsRequested(const QString& filePath);
     void onPdfOpened       (const QString& filePath, const QDateTime& when);
+    void onFileSelected    (const QString& filePath);
+    void onAddNote();
+    void onCreateGroup();
+    void onGroupItemChanged(QListWidgetItem* item);
+    void onValidateGithub();
+    void onValidateB2();
 
     // ── Search ────────────────────────────────────────────────────────────────
     void onSearchTextChanged(const QString& text);
@@ -80,6 +92,9 @@ private:
     void initMenuBar();
     void initStatusBar();
     void connectSignals();
+    QWidget* buildDetailPane();
+    void refreshDetailPane();
+    int selectedGroupId() const;
     void restoreLayout();
     void saveLayout();
     QString dataDir() const;
@@ -104,7 +119,17 @@ private:
     QStackedWidget*  m_viewStack   = nullptr;
     ListView*        m_listView    = nullptr;
     GridView*        m_gridView    = nullptr;
+    QTabWidget*      m_rightTabs   = nullptr;
     RecentView*      m_recentView  = nullptr;
+    QLabel*          m_detailTitle = nullptr;
+    QLabel*          m_detailMeta  = nullptr;
+    QListWidget*     m_groupList   = nullptr;
+    QTextEdit*       m_noteEdit    = nullptr;
+    QVBoxLayout*     m_notesLayout = nullptr;
+    QPushButton*     m_addNoteBtn  = nullptr;
+    QPushButton*     m_githubBtn   = nullptr;
+    QPushButton*     m_b2Btn       = nullptr;
+    QString          m_selectedFilePath;
 
     // ── Toolbar widgets ───────────────────────────────────────────────────────
     QLineEdit*       m_searchEdit  = nullptr;

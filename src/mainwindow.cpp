@@ -45,6 +45,21 @@
 #include <QDialogButtonBox>
 #include <QCheckBox>
 #include <QStringList>
+#include <QFormLayout>
+#include <QInputDialog>
+#include <QListWidgetItem>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPushButton>
+#include <QRegularExpression>
+#include <QScrollArea>
+#include <QSignalBlocker>
+#include <QTabWidget>
+#include <QTextEdit>
+#include <QUrl>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Construction
@@ -126,16 +141,19 @@ void MainWindow::initViews()
     m_viewStack->addWidget(m_listView);   // index 0 = list
     m_viewStack->addWidget(m_gridView);   // index 1 = grid
 
-    m_recentView  = new RecentView(m_pdfModel, m_splitter);
+    m_rightTabs = new QTabWidget(m_splitter);
+    m_rightTabs->addTab(buildDetailPane(), QStringLiteral("Details"));
+    m_recentView = new RecentView(m_pdfModel, m_rightTabs);
+    m_rightTabs->addTab(m_recentView, QStringLiteral("Recent"));
 
     m_splitter->addWidget(m_folderPanel);
     m_splitter->addWidget(m_viewStack);
-    m_splitter->addWidget(m_recentView);
+    m_splitter->addWidget(m_rightTabs);
 
     m_splitter->setStretchFactor(0, 0);   // folder panel:  fixed (220px)
     m_splitter->setStretchFactor(1, 1);   // main content:  stretch
     m_splitter->setStretchFactor(2, 0);   // recent panel:  fixed (240px)
-    m_splitter->setSizes({220, 700, 240});
+    m_splitter->setSizes({220, 700, 280});
 
     setCentralWidget(m_splitter);
 }
@@ -277,6 +295,8 @@ void MainWindow::connectSignals()
     // List view
     connect(m_listView, &ListView::fileActivated,
             this, &MainWindow::onFileActivated);
+    connect(m_listView, &ListView::fileSelected,
+            this, &MainWindow::onFileSelected);
     connect(m_listView, &ListView::editTagsRequested,
             this, &MainWindow::onEditTagsRequested);
     connect(m_listView, &ListView::thumbnailNeeded,
@@ -285,6 +305,8 @@ void MainWindow::connectSignals()
     // Grid view
     connect(m_gridView, &GridView::fileActivated,
             this, &MainWindow::onFileActivated);
+    connect(m_gridView, &GridView::fileSelected,
+            this, &MainWindow::onFileSelected);
     connect(m_gridView, &GridView::editTagsRequested,
             this, &MainWindow::onEditTagsRequested);
     connect(m_gridView, &GridView::thumbnailNeeded,
@@ -391,6 +413,14 @@ void MainWindow::onFileActivated(const QString& filePath)
     m_pdfCtrl->openPdf(filePath);
 }
 
+void MainWindow::onFileSelected(const QString& filePath)
+{
+    m_selectedFilePath = filePath;
+    refreshDetailPane();
+    if (m_rightTabs)
+        m_rightTabs->setCurrentIndex(0);
+}
+
 void MainWindow::onEditTagsRequested(const QString& filePath)
 {
     const PdfFile f = m_pdfModel->fileByPath(filePath);
@@ -441,6 +471,132 @@ void MainWindow::onPdfOpened(const QString& /*filePath*/, const QDateTime& /*whe
     updateStatusBar();
 }
 
+void MainWindow::onAddNote()
+{
+    const PdfFile f = m_pdfModel->fileByPath(m_selectedFilePath);
+    if (!f.isValid()) return;
+
+    const QString author = m_db->getSetting(QStringLiteral("githubUser"), QStringLiteral("local")).toString().trimmed();
+    if (author.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("GitHub User Required"),
+                             QStringLiteral("Set your GitHub username in Settings before adding notes."));
+        return;
+    }
+
+    if (m_db->addNote(f.id, author, m_noteEdit->toPlainText())) {
+        m_noteEdit->clear();
+        refreshDetailPane();
+    }
+}
+
+void MainWindow::onCreateGroup()
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, QStringLiteral("New Group"),
+                                               QStringLiteral("Group name:"), QLineEdit::Normal,
+                                               QString{}, &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+    if (m_db->createGroup(name) < 0) {
+        QMessageBox::warning(this, QStringLiteral("Group Exists"),
+                             QStringLiteral("Could not create that group."));
+        return;
+    }
+    refreshDetailPane();
+}
+
+void MainWindow::onGroupItemChanged(QListWidgetItem* item)
+{
+    const PdfFile f = m_pdfModel->fileByPath(m_selectedFilePath);
+    if (!f.isValid() || !item) return;
+    m_db->setFileInGroup(f.id, item->data(Qt::UserRole).toInt(), item->checkState() == Qt::Checked);
+}
+
+void MainWindow::onValidateGithub()
+{
+    const int groupId = selectedGroupId();
+    if (groupId < 0) return;
+
+    const FileGroup group = m_db->groupById(groupId);
+    const QString current = group.githubRepoUrl;
+    bool ok = false;
+    QString repoUrl = QInputDialog::getText(this, QStringLiteral("GitHub Repo"),
+                                            QStringLiteral("Repo URL:"), QLineEdit::Normal,
+                                            current, &ok).trimmed();
+    if (!ok || repoUrl.isEmpty()) return;
+
+    const QRegularExpression re(QStringLiteral("^https://github\\.com/([^/]+)/([^/.]+)(?:\\.git)?/?$"));
+    const QRegularExpressionMatch match = re.match(repoUrl);
+    if (!match.hasMatch()) {
+        QMessageBox::warning(this, QStringLiteral("Invalid Repo"),
+                             QStringLiteral("Use https://github.com/owner/repo."));
+        return;
+    }
+
+    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/%1/%2")
+                         .arg(match.captured(1), match.captured(2))));
+    req.setRawHeader("User-Agent", "PDFOrganizer");
+    QNetworkAccessManager nam;
+    QNetworkReply* reply = nam.get(req);
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    const bool valid = reply->error() == QNetworkReply::NoError;
+    reply->deleteLater();
+    if (!valid) {
+        QMessageBox::warning(this, QStringLiteral("Repo Not Valid"),
+                             QStringLiteral("GitHub could not validate that public repo."));
+        return;
+    }
+
+    m_db->saveGroupGithubValidation(groupId, repoUrl, QStringLiteral("valid"));
+    refreshDetailPane();
+}
+
+void MainWindow::onValidateB2()
+{
+    const int groupId = selectedGroupId();
+    if (groupId < 0) return;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(QStringLiteral("Backblaze B2"));
+    auto* form = new QFormLayout(&dlg);
+    QLineEdit keyId;
+    QLineEdit appKey;
+    QLineEdit bucket;
+    appKey.setEchoMode(QLineEdit::Password);
+    form->addRow(QStringLiteral("Key ID:"), &keyId);
+    form->addRow(QStringLiteral("App key:"), &appKey);
+    form->addRow(QStringLiteral("Bucket:"), &bucket);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QNetworkRequest req(QUrl(QStringLiteral("https://api.backblazeb2.com/b2api/v4/b2_authorize_account")));
+    const QByteArray basic = (keyId.text().trimmed() + QLatin1Char(':') + appKey.text()).toUtf8().toBase64();
+    req.setRawHeader("Authorization", "Basic " + basic);
+    QNetworkAccessManager nam;
+    QNetworkReply* reply = nam.get(req);
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+
+    const QByteArray body = reply->readAll();
+    const bool valid = reply->error() == QNetworkReply::NoError;
+    reply->deleteLater();
+    if (!valid) {
+        QMessageBox::warning(this, QStringLiteral("B2 Not Valid"),
+                             QStringLiteral("Backblaze rejected those keys."));
+        return;
+    }
+
+    const QString accountId = QJsonDocument::fromJson(body).object().value(QStringLiteral("accountId")).toString();
+    m_db->saveGroupB2Validation(groupId, keyId.text(), bucket.text(), accountId, QStringLiteral("valid"));
+    refreshDetailPane();
+}
+
 void MainWindow::onSearchTextChanged(const QString& text)
 {
     m_proxy->setSearchText(text);
@@ -480,6 +636,118 @@ void MainWindow::onScanFinished(const QString& folder)
 
     // Clear the message after 3 seconds
     QTimer::singleShot(3000, m_scanLabel, [this]() { m_scanLabel->clear(); });
+}
+
+QWidget* MainWindow::buildDetailPane()
+{
+    auto* pane = new QWidget;
+    auto* root = new QVBoxLayout(pane);
+
+    m_detailTitle = new QLabel(QStringLiteral("No file selected"), pane);
+    m_detailTitle->setObjectName(QStringLiteral("sectionLabel"));
+    m_detailTitle->setWordWrap(true);
+    root->addWidget(m_detailTitle);
+
+    m_detailMeta = new QLabel(pane);
+    m_detailMeta->setWordWrap(true);
+    root->addWidget(m_detailMeta);
+
+    root->addWidget(new QLabel(QStringLiteral("GROUPS"), pane));
+    m_groupList = new QListWidget(pane);
+    m_groupList->setMinimumHeight(120);
+    root->addWidget(m_groupList);
+
+    auto* groupRow = new QHBoxLayout;
+    auto* addGroupBtn = new QPushButton(QStringLiteral("Add Group"), pane);
+    m_githubBtn = new QPushButton(QStringLiteral("Validate GitHub"), pane);
+    m_b2Btn = new QPushButton(QStringLiteral("Validate B2"), pane);
+    groupRow->addWidget(addGroupBtn);
+    groupRow->addWidget(m_githubBtn);
+    groupRow->addWidget(m_b2Btn);
+    root->addLayout(groupRow);
+
+    root->addWidget(new QLabel(QStringLiteral("NOTES"), pane));
+    m_noteEdit = new QTextEdit(pane);
+    m_noteEdit->setPlaceholderText(QStringLiteral("Add a note…"));
+    m_noteEdit->setMaximumHeight(90);
+    root->addWidget(m_noteEdit);
+    m_addNoteBtn = new QPushButton(QStringLiteral("Add Note"), pane);
+    root->addWidget(m_addNoteBtn);
+
+    auto* noteScroll = new QScrollArea(pane);
+    noteScroll->setWidgetResizable(true);
+    noteScroll->setFrameShape(QFrame::NoFrame);
+    auto* noteBody = new QWidget(noteScroll);
+    m_notesLayout = new QVBoxLayout(noteBody);
+    m_notesLayout->addStretch();
+    noteScroll->setWidget(noteBody);
+    root->addWidget(noteScroll, 1);
+
+    connect(addGroupBtn, &QPushButton::clicked, this, &MainWindow::onCreateGroup);
+    connect(m_githubBtn, &QPushButton::clicked, this, &MainWindow::onValidateGithub);
+    connect(m_b2Btn, &QPushButton::clicked, this, &MainWindow::onValidateB2);
+    connect(m_addNoteBtn, &QPushButton::clicked, this, &MainWindow::onAddNote);
+    connect(m_groupList, &QListWidget::itemChanged, this, &MainWindow::onGroupItemChanged);
+    connect(m_groupList, &QListWidget::currentItemChanged, this, [this](QListWidgetItem* current) {
+        const bool enabled = current && !m_selectedFilePath.isEmpty();
+        m_githubBtn->setEnabled(enabled);
+        m_b2Btn->setEnabled(enabled);
+    });
+
+    return pane;
+}
+
+void MainWindow::refreshDetailPane()
+{
+    const PdfFile f = m_pdfModel->fileByPath(m_selectedFilePath);
+    const bool hasFile = f.isValid();
+    m_detailTitle->setText(hasFile ? f.fileName : QStringLiteral("No file selected"));
+    m_detailMeta->setText(hasFile
+        ? QStringLiteral("%1\n%2").arg(f.filePath, f.tags.join(QStringLiteral(", ")))
+        : QString{});
+    m_groupList->setEnabled(hasFile);
+    m_noteEdit->setEnabled(hasFile);
+    m_addNoteBtn->setEnabled(hasFile);
+    m_githubBtn->setEnabled(hasFile && selectedGroupId() >= 0);
+    m_b2Btn->setEnabled(hasFile && selectedGroupId() >= 0);
+
+    {
+        const QSignalBlocker blocker(m_groupList);
+        m_groupList->clear();
+        const QList<int> fileGroups = hasFile ? m_db->fileGroupIds(f.id) : QList<int>{};
+        for (const FileGroup& group : m_db->loadGroups()) {
+            auto* item = new QListWidgetItem(group.name, m_groupList);
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setData(Qt::UserRole, group.id);
+            item->setToolTip(QStringLiteral("GitHub: %1\nB2: %2")
+                             .arg(group.githubStatus, group.b2Status));
+            item->setCheckState(fileGroups.contains(group.id) ? Qt::Checked : Qt::Unchecked);
+        }
+    }
+
+    while (QLayoutItem* item = m_notesLayout->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+
+    if (hasFile) {
+        for (const FileNote& note : m_db->loadNotes(f.id)) {
+            auto* label = new QLabel(QStringLiteral("%1 · %2\n%3")
+                .arg(note.author,
+                     note.createdAt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd hh:mm")),
+                     note.body));
+            label->setWordWrap(true);
+            label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            m_notesLayout->addWidget(label);
+        }
+    }
+    m_notesLayout->addStretch();
+}
+
+int MainWindow::selectedGroupId() const
+{
+    QListWidgetItem* item = m_groupList ? m_groupList->currentItem() : nullptr;
+    return item ? item->data(Qt::UserRole).toInt() : -1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
