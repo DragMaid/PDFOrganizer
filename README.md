@@ -17,6 +17,8 @@ PDF files — built with **C++17** and **Qt 6** (Widgets).
 | **Grid / card view** | Thumbnail cards with tag pills; async thumbnail generation |
 | **Search** | Live filter by filename and/or tag text |
 | **Tag filter** | One-click chips in the left panel (AND semantics) |
+| **File notes** | Right-side file details with GitHub-user notes and per-file groups |
+| **Sync setup** | Per-group GitHub repo and Backblaze B2 validation; files stay local until upload support is added |
 | **Recent activity** | Bottom dock showing the 20 most recently opened PDFs |
 | **Dark mode** | Full stylesheet; persisted per-user; toggled in Settings |
 | **Persistent settings** | SQLite for metadata; `QSettings` for window geometry |
@@ -204,6 +206,35 @@ CREATE TABLE pdf_tags (
 
 -- Key-value application settings
 CREATE TABLE settings (key TEXT UNIQUE, value TEXT);
+
+-- Named file groups and validation metadata
+CREATE TABLE file_groups (
+    id INTEGER PRIMARY KEY,
+    name TEXT UNIQUE COLLATE NOCASE,
+    github_repo_url TEXT,
+    github_status TEXT,
+    github_validated_at TEXT,
+    b2_key_id TEXT,
+    b2_bucket_name TEXT,
+    b2_account_id TEXT,
+    b2_status TEXT,
+    b2_validated_at TEXT
+);
+
+-- Group membership and notes
+CREATE TABLE file_group_members (
+    group_id INTEGER REFERENCES file_groups(id) ON DELETE CASCADE,
+    pdf_id INTEGER REFERENCES pdf_files(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, pdf_id)
+);
+
+CREATE TABLE file_notes (
+    id INTEGER PRIMARY KEY,
+    pdf_id INTEGER REFERENCES pdf_files(id) ON DELETE CASCADE,
+    author TEXT,
+    body TEXT,
+    created_at TEXT
+);
 ```
 
 ---
