@@ -4,6 +4,7 @@
 class DatabaseManager;
 class QCheckBox;
 class QComboBox;
+class QLineEdit;
 
 /**
  * @brief Settings dialog for user preferences (view mode, theme, etc.)
@@ -30,4 +31,5 @@ private:
     DatabaseManager* m_db;
     QCheckBox*  m_darkModeCheck  = nullptr;
     QComboBox*  m_defaultViewCbo = nullptr;
+    QLineEdit*  m_githubUserEdit = nullptr;
 };

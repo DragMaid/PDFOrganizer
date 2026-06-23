@@ -25,6 +25,7 @@ public:
 
 signals:
     void fileActivated    (const QString& filePath);
+    void fileSelected     (const QString& filePath);
     void editTagsRequested(const QString& filePath);
     void thumbnailNeeded  (const QString& filePath);
 

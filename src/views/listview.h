@@ -27,6 +27,7 @@ public:
 signals:
     /// User double-clicked (or pressed Enter) on a PDF row.
     void fileActivated(const QString& filePath);
+    void fileSelected(const QString& filePath);
 
     /// User wants to assign/edit tags for this file.
     void editTagsRequested(const QString& filePath);

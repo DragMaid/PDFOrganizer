@@ -83,7 +83,7 @@ void TagManagerDialog::onDeleteTag()
     const auto reply = QMessageBox::question(
         this,
         QStringLiteral("Delete Tag"),
-        QStringLiteral("Delete tag '%1'? It will be removed from all PDFs.").arg(tag),
+        QStringLiteral("Delete tag '%1'?\n\nThis removes it from every tracked PDF.").arg(tag),
         QMessageBox::Yes | QMessageBox::Cancel);
 
     if (reply == QMessageBox::Yes)

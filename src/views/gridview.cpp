@@ -8,6 +8,7 @@
 #include <QScrollBar>
 #include <QAction>
 #include <QTimer>
+#include <QItemSelectionModel>
 
 GridView::GridView(PdfModel*         model,
                    SearchFilterProxy* proxy,
@@ -51,6 +52,12 @@ void GridView::buildUi()
             this, &GridView::onActivated);
     connect(m_listView, &QListView::doubleClicked,
             this, &GridView::onActivated);
+    connect(m_listView->selectionModel(), &QItemSelectionModel::currentChanged,
+            this, [this](const QModelIndex& current, const QModelIndex&) {
+                if (!current.isValid()) return;
+                const QModelIndex srcIdx = m_proxy->mapToSource(current);
+                emit fileSelected(m_model->data(srcIdx, PdfModel::FilePathRole).toString());
+            });
 
     // Request thumbnails as the user scrolls
     connect(m_listView->verticalScrollBar(), &QScrollBar::valueChanged,

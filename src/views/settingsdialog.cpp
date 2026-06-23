@@ -6,6 +6,8 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QGroupBox>
+#include <QLineEdit>
+#include <QProcessEnvironment>
 
 SettingsDialog::SettingsDialog(DatabaseManager* db, QWidget* parent)
     : QDialog(parent), m_db(db)
@@ -33,6 +35,14 @@ void SettingsDialog::buildUi()
     form->addRow(QStringLiteral("Default view:"), m_defaultViewCbo);
 
     root->addWidget(appearGrp);
+
+    auto* identityGrp = new QGroupBox(QStringLiteral("Identity"), this);
+    auto* identityForm = new QFormLayout(identityGrp);
+    m_githubUserEdit = new QLineEdit(this);
+    m_githubUserEdit->setPlaceholderText(QStringLiteral("GitHub username"));
+    identityForm->addRow(QStringLiteral("GitHub user:"), m_githubUserEdit);
+    root->addWidget(identityGrp);
+
     root->addStretch();
 
     auto* buttons = new QDialogButtonBox(
@@ -51,6 +61,11 @@ void SettingsDialog::loadSettings()
         QStringLiteral("defaultView"), QStringLiteral("list")).toString();
     const int idx = m_defaultViewCbo->findData(view);
     m_defaultViewCbo->setCurrentIndex(idx >= 0 ? idx : 0);
+
+    const QString fallbackUser = QProcessEnvironment::systemEnvironment()
+        .value(QStringLiteral("USER"), QStringLiteral("local"));
+    m_githubUserEdit->setText(
+        m_db->getSetting(QStringLiteral("githubUser"), fallbackUser).toString());
 }
 
 void SettingsDialog::accept()
@@ -59,6 +74,7 @@ void SettingsDialog::accept()
     m_db->setSetting(QStringLiteral("darkMode"), dark);
     m_db->setSetting(QStringLiteral("defaultView"),
                      m_defaultViewCbo->currentData().toString());
+    m_db->setSetting(QStringLiteral("githubUser"), m_githubUserEdit->text().trimmed());
 
     emit darkModeChanged(dark);
     QDialog::accept();

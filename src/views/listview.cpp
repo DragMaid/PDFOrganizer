@@ -10,6 +10,7 @@
 #include <QAction>
 #include <QTimer>
 #include <QScrollBar>
+#include <QItemSelectionModel>
 
 ListView::ListView(PdfModel*         model,
                    SearchFilterProxy* proxy,
@@ -69,6 +70,12 @@ void ListView::buildUi()
 
     connect(m_tableView, &QTableView::activated, this, &ListView::onActivated);
     connect(m_tableView, &QTableView::doubleClicked, this, &ListView::onActivated);
+    connect(m_tableView->selectionModel(), &QItemSelectionModel::currentRowChanged,
+            this, [this](const QModelIndex& current, const QModelIndex&) {
+                if (!current.isValid()) return;
+                const QModelIndex srcIdx = m_proxy->mapToSource(current);
+                emit fileSelected(m_model->data(srcIdx, PdfModel::FilePathRole).toString());
+            });
 
     // Request thumbnails as the user scrolls
     connect(m_tableView->verticalScrollBar(), &QScrollBar::valueChanged,
