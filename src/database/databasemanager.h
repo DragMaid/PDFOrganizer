@@ -90,6 +90,9 @@ public:
     bool           saveGroupGithubValidation(int groupId, const QString& repoUrl, const QString& status);
     bool           saveGroupB2Validation(int groupId, const QString& keyId, const QString& bucketName,
                                          const QString& accountId, const QString& status);
+    bool           wasFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified) const;
+    bool           markFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified,
+                                    const QString& b2FileId);
     QList<FileNote> loadNotes(int fileId) const;
     bool           addNote(int fileId, const QString& author, const QString& body);
 

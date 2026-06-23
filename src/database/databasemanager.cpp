@@ -139,6 +139,18 @@ bool DatabaseManager::createSchema()
             )
         )"),
 
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS file_uploads (
+                group_id      INTEGER NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
+                pdf_id        INTEGER NOT NULL REFERENCES pdf_files(id) ON DELETE CASCADE,
+                file_size     INTEGER NOT NULL,
+                last_modified TEXT,
+                b2_file_id    TEXT,
+                uploaded_at   TEXT NOT NULL,
+                PRIMARY KEY (group_id, pdf_id)
+            )
+        )"),
+
         // Performance indexes
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_folder ON pdf_files(folder_path)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_opened ON pdf_files(last_opened)"),
@@ -501,6 +513,43 @@ bool DatabaseManager::saveGroupB2Validation(int groupId, const QString& keyId, c
     q.bindValue(QStringLiteral(":status"), status);
     q.bindValue(QStringLiteral(":at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     q.bindValue(QStringLiteral(":id"), groupId);
+    return q.exec();
+}
+
+bool DatabaseManager::wasFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        SELECT 1 FROM file_uploads
+        WHERE group_id = :g AND pdf_id = :p AND file_size = :s AND last_modified = :m
+    )"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    q.bindValue(QStringLiteral(":p"), fileId);
+    q.bindValue(QStringLiteral(":s"), fileSize);
+    q.bindValue(QStringLiteral(":m"), modified.toString(Qt::ISODate));
+    return q.exec() && q.next();
+}
+
+bool DatabaseManager::markFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified,
+                                       const QString& b2FileId)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        INSERT INTO file_uploads
+            (group_id, pdf_id, file_size, last_modified, b2_file_id, uploaded_at)
+        VALUES (:g, :p, :s, :m, :b2, :at)
+        ON CONFLICT(group_id, pdf_id) DO UPDATE SET
+            file_size = excluded.file_size,
+            last_modified = excluded.last_modified,
+            b2_file_id = excluded.b2_file_id,
+            uploaded_at = excluded.uploaded_at
+    )"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    q.bindValue(QStringLiteral(":p"), fileId);
+    q.bindValue(QStringLiteral(":s"), fileSize);
+    q.bindValue(QStringLiteral(":m"), modified.toString(Qt::ISODate));
+    q.bindValue(QStringLiteral(":b2"), b2FileId);
+    q.bindValue(QStringLiteral(":at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     return q.exec();
 }
 
