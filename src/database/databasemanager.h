@@ -85,11 +85,15 @@ public:
     FileGroup      groupById(int groupId) const;
     int            createGroup(const QString& name);
     bool           deleteGroup(int groupId);
+    bool           renameGroup(int groupId, const QString& newName);
+    bool           clearGroupMembers(int groupId);
     bool           setFileInGroup(int fileId, int groupId, bool tracked);
     QList<int>     fileGroupIds(int fileId) const;
     bool           saveGroupGithubValidation(int groupId, const QString& repoUrl, const QString& status);
     bool           saveGroupB2Validation(int groupId, const QString& keyId, const QString& bucketName,
                                          const QString& accountId, const QString& status);
+    bool           saveGroupSetting(int groupId, const QString& key, const QString& value);
+    QString        getGroupSetting(int groupId, const QString& key, const QString& defaultValue = QString()) const;
     bool           wasFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified) const;
     bool           markFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified,
                                     const QString& b2FileId);

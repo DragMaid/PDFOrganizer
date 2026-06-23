@@ -70,9 +70,9 @@ private slots:
     void onFileSelected    (const QString& filePath);
     void onAddNote();
     void onCreateGroup();
+    void onEditGroup();
+    void onRemoveGroup();
     void onGroupItemChanged(QListWidgetItem* item);
-    void onValidateGithub();
-    void onValidateB2();
     void onSyncGroup();
 
     // ── Search ────────────────────────────────────────────────────────────────
@@ -128,8 +128,8 @@ private:
     QTextEdit*       m_noteEdit    = nullptr;
     QVBoxLayout*     m_notesLayout = nullptr;
     QPushButton*     m_addNoteBtn  = nullptr;
-    QPushButton*     m_githubBtn   = nullptr;
-    QPushButton*     m_b2Btn       = nullptr;
+    QPushButton*     m_editGroupBtn = nullptr;
+    QPushButton*     m_removeGroupBtn = nullptr;
     QPushButton*     m_syncBtn     = nullptr;
     QString          m_selectedFilePath;
 

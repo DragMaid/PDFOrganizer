@@ -139,6 +139,16 @@ bool DatabaseManager::createSchema()
             )
         )"),
 
+            // Per-group arbitrary settings (folder path, stored tokens, ssh key path, etc.)
+            QStringLiteral(R"(
+                CREATE TABLE IF NOT EXISTS file_group_settings (
+                    group_id INTEGER NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
+                    key      TEXT    NOT NULL,
+                    value    TEXT,
+                    PRIMARY KEY (group_id, key)
+                )
+            )"),
+
         QStringLiteral(R"(
             CREATE TABLE IF NOT EXISTS file_uploads (
                 group_id      INTEGER NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
@@ -452,6 +462,23 @@ bool DatabaseManager::deleteGroup(int groupId)
     return q.exec();
 }
 
+bool DatabaseManager::renameGroup(int groupId, const QString& newName)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE file_groups SET name = :name WHERE id = :id"));
+    q.bindValue(QStringLiteral(":name"), newName.trimmed());
+    q.bindValue(QStringLiteral(":id"), groupId);
+    return q.exec();
+}
+
+bool DatabaseManager::clearGroupMembers(int groupId)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM file_group_members WHERE group_id = :g"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    return q.exec();
+}
+
 bool DatabaseManager::setFileInGroup(int fileId, int groupId, bool tracked)
 {
     QSqlQuery q(m_db);
@@ -593,6 +620,31 @@ bool DatabaseManager::addNote(int fileId, const QString& author, const QString& 
     q.bindValue(QStringLiteral(":body"), trimmed);
     q.bindValue(QStringLiteral(":at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
     return q.exec();
+}
+
+bool DatabaseManager::saveGroupSetting(int groupId, const QString& key, const QString& value)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        INSERT INTO file_group_settings (group_id, key, value)
+        VALUES (:g, :k, :v)
+        ON CONFLICT(group_id, key) DO UPDATE SET value = excluded.value
+    )"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    q.bindValue(QStringLiteral(":k"), key);
+    q.bindValue(QStringLiteral(":v"), value);
+    return q.exec();
+}
+
+QString DatabaseManager::getGroupSetting(int groupId, const QString& key, const QString& defaultValue) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT value FROM file_group_settings WHERE group_id = :g AND key = :k"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    q.bindValue(QStringLiteral(":k"), key);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return defaultValue;
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

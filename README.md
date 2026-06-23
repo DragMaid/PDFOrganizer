@@ -18,7 +18,7 @@ PDF files — built with **C++17** and **Qt 6** (Widgets).
 | **Search** | Live filter by filename and/or tag text |
 | **Tag filter** | One-click chips in the left panel (AND semantics) |
 | **File notes** | Right-side file details with GitHub-user notes and per-file groups |
-| **Sync setup** | Per-group GitHub repo and Backblaze B2 validation; files stay local until upload support is added |
+| **Group sync** | Per-group metadata push to GitHub and changed PDF upload to Backblaze B2 using provided auth tokens |
 | **Recent activity** | Bottom dock showing the 20 most recently opened PDFs |
 | **Dark mode** | Full stylesheet; persisted per-user; toggled in Settings |
 | **Persistent settings** | SQLite for metadata; `QSettings` for window geometry |
@@ -234,6 +234,17 @@ CREATE TABLE file_notes (
     author TEXT,
     body TEXT,
     created_at TEXT
+);
+
+-- Tracks uploaded files so unchanged PDFs are not uploaded again
+CREATE TABLE file_uploads (
+    group_id INTEGER REFERENCES file_groups(id) ON DELETE CASCADE,
+    pdf_id INTEGER REFERENCES pdf_files(id) ON DELETE CASCADE,
+    file_size INTEGER,
+    last_modified TEXT,
+    b2_file_id TEXT,
+    uploaded_at TEXT,
+    PRIMARY KEY (group_id, pdf_id)
 );
 ```
 
