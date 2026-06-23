@@ -1,7 +1,31 @@
 #pragma once
 #include <QObject>
 #include <QSqlDatabase>
+#include <QDateTime>
 #include "models/pdffile.h"
+
+struct FileGroup
+{
+    int id = -1;
+    QString name;
+    QString githubRepoUrl;
+    QString githubStatus;
+    QDateTime githubValidatedAt;
+    QString b2KeyId;
+    QString b2BucketName;
+    QString b2AccountId;
+    QString b2Status;
+    QDateTime b2ValidatedAt;
+};
+
+struct FileNote
+{
+    int id = -1;
+    int fileId = -1;
+    QString author;
+    QString body;
+    QDateTime createdAt;
+};
 
 /**
  * @brief Thin wrapper around a SQLite database for persisting application state.
@@ -55,6 +79,19 @@ public:
     // ── Settings key-value ────────────────────────────────────────────────────
     QVariant        getSetting(const QString& key, const QVariant& defaultValue = {}) const;
     bool            setSetting(const QString& key, const QVariant& value);
+
+    // ── Groups and notes ──────────────────────────────────────────────────────
+    QList<FileGroup> loadGroups() const;
+    FileGroup      groupById(int groupId) const;
+    int            createGroup(const QString& name);
+    bool           deleteGroup(int groupId);
+    bool           setFileInGroup(int fileId, int groupId, bool tracked);
+    QList<int>     fileGroupIds(int fileId) const;
+    bool           saveGroupGithubValidation(int groupId, const QString& repoUrl, const QString& status);
+    bool           saveGroupB2Validation(int groupId, const QString& keyId, const QString& bucketName,
+                                         const QString& accountId, const QString& status);
+    QList<FileNote> loadNotes(int fileId) const;
+    bool           addNote(int fileId, const QString& author, const QString& body);
 
 private:
     bool createSchema();

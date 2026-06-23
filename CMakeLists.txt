@@ -9,7 +9,7 @@ set(CMAKE_AUTOUIC ON)
 
 # ── Find Qt6 ──────────────────────────────────────────────────────────────────
 find_package(Qt6 REQUIRED COMPONENTS
-    Core Widgets Sql Concurrent
+    Core Widgets Sql Concurrent Network
 )
 
 # Optional: Qt6::Pdf for thumbnail generation (Qt 6.4+)
@@ -81,6 +81,7 @@ target_link_libraries(PDFOrganizer PRIVATE
     Qt6::Widgets
     Qt6::Sql
     Qt6::Concurrent
+    Qt6::Network
 )
 
 if(Qt6Pdf_FOUND)
