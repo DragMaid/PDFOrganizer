@@ -4,39 +4,25 @@
 #include <QDateTime>
 #include "models/pdffile.h"
 
-struct FileGroup
-{
-    int id = -1;
-    QString name;
-    QString githubRepoUrl;
-    QString githubStatus;
-    QDateTime githubValidatedAt;
-    QString b2KeyId;
-    QString b2BucketName;
-    QString b2AccountId;
-    QString b2Status;
-    QDateTime b2ValidatedAt;
-};
-
-struct FileNote
-{
-    int id = -1;
-    int fileId = -1;
-    QString author;
-    QString body;
-    QDateTime createdAt;
-};
-
 /**
- * @brief Thin wrapper around a SQLite database for persisting application state.
+ * @brief Local SQLite store: everything that is specific to this machine.
+ *
+ * Groups, notes, shared tags and uploaded blobs live on the backend (see
+ * ApiClient) — this database holds only what a single installation needs,
+ * plus caches that make talking to the backend cheaper.
  *
  * Schema
  * ──────
- *   folders   (id, path)
- *   tags      (id, name)
- *   pdf_files (id, path, folder_path, file_name, file_size, last_modified,
- *              last_opened, page_count)
- *   pdf_tags  (pdf_id, tag_id)   – many-to-many join
+ *   folders      (id, path)                  – watched roots on this machine
+ *   tags         (id, name)                  – local mirror of the tag vocabulary
+ *   pdf_files    (id, path, folder_path, file_name, file_size, last_modified,
+ *                 last_opened, page_count)   – scan results
+ *   pdf_tags     (pdf_id, tag_id)            – many-to-many join
+ *   settings     (key, value)                – preferences and the saved session
+ *   file_hashes  (path, content_hash, …)     – so a file is hashed once, not
+ *                                              on every sync
+ *   remote_files (group_id, content_hash, remote_file_id)
+ *                                            – local path → backend file id
  *
  * All public methods are synchronous and should be called from the main thread.
  * Heavy scanning work is done in FolderWatcher on a worker thread; only the
@@ -80,25 +66,25 @@ public:
     QVariant        getSetting(const QString& key, const QVariant& defaultValue = {}) const;
     bool            setSetting(const QString& key, const QVariant& value);
 
-    // ── Groups and notes ──────────────────────────────────────────────────────
-    QList<FileGroup> loadGroups() const;
-    FileGroup      groupById(int groupId) const;
-    int            createGroup(const QString& name);
-    bool           deleteGroup(int groupId);
-    bool           renameGroup(int groupId, const QString& newName);
-    bool           clearGroupMembers(int groupId);
-    bool           setFileInGroup(int fileId, int groupId, bool tracked);
-    QList<int>     fileGroupIds(int fileId) const;
-    bool           saveGroupGithubValidation(int groupId, const QString& repoUrl, const QString& status);
-    bool           saveGroupB2Validation(int groupId, const QString& keyId, const QString& bucketName,
-                                         const QString& accountId, const QString& status);
-    bool           saveGroupSetting(int groupId, const QString& key, const QString& value);
-    QString        getGroupSetting(int groupId, const QString& key, const QString& defaultValue = QString()) const;
-    bool           wasFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified) const;
-    bool           markFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified,
-                                    const QString& b2FileId);
-    QList<FileNote> loadNotes(int fileId) const;
-    bool           addNote(int fileId, const QString& author, const QString& body);
+    // ── Content-hash cache ────────────────────────────────────────────────────
+    // The backend identifies a PDF by the SHA-256 of its contents. Hashing is
+    // the expensive part of a sync, so a digest is kept until the file's size
+    // or modification time changes.
+
+    /// Cached digest for @p path, or an empty string if absent or stale.
+    QString        cachedHash(const QString& path, qint64 fileSize,
+                              const QDateTime& modified) const;
+    bool           storeHash (const QString& path, const QString& contentHash,
+                              qint64 fileSize, const QDateTime& modified);
+
+    // ── Remote id cache ───────────────────────────────────────────────────────
+    /// Backend file id for a hash within a group, or -1 if not registered yet.
+    int            remoteFileId    (int groupId, const QString& contentHash) const;
+    bool           storeRemoteFileId(int groupId, const QString& contentHash,
+                                     int remoteFileId);
+    bool           forgetRemoteFile (int groupId, const QString& contentHash);
+    /// Drop every cached backend id — used when signing out or changing server.
+    bool           clearRemoteCache();
 
 private:
     bool createSchema();

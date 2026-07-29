@@ -106,65 +106,31 @@ bool DatabaseManager::createSchema()
             )
         )"),
 
+        // SHA-256 of each file's contents — the identity the backend keys
+        // files by. Recomputed only when size or mtime moves.
         QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS file_groups (
-                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-                name                TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                github_repo_url     TEXT,
-                github_status       TEXT,
-                github_validated_at TEXT,
-                b2_key_id           TEXT,
-                b2_bucket_name      TEXT,
-                b2_account_id       TEXT,
-                b2_status           TEXT,
-                b2_validated_at     TEXT
-            )
-        )"),
-
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS file_group_members (
-                group_id INTEGER NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
-                pdf_id   INTEGER NOT NULL REFERENCES pdf_files(id) ON DELETE CASCADE,
-                PRIMARY KEY (group_id, pdf_id)
-            )
-        )"),
-
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS file_notes (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                pdf_id     INTEGER NOT NULL REFERENCES pdf_files(id) ON DELETE CASCADE,
-                author     TEXT NOT NULL,
-                body       TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-        )"),
-
-            // Per-group arbitrary settings (folder path, stored tokens, ssh key path, etc.)
-            QStringLiteral(R"(
-                CREATE TABLE IF NOT EXISTS file_group_settings (
-                    group_id INTEGER NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
-                    key      TEXT    NOT NULL,
-                    value    TEXT,
-                    PRIMARY KEY (group_id, key)
-                )
-            )"),
-
-        QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS file_uploads (
-                group_id      INTEGER NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
-                pdf_id        INTEGER NOT NULL REFERENCES pdf_files(id) ON DELETE CASCADE,
+            CREATE TABLE IF NOT EXISTS file_hashes (
+                path          TEXT PRIMARY KEY,
+                content_hash  TEXT NOT NULL,
                 file_size     INTEGER NOT NULL,
-                last_modified TEXT,
-                b2_file_id    TEXT,
-                uploaded_at   TEXT NOT NULL,
-                PRIMARY KEY (group_id, pdf_id)
+                last_modified TEXT
+            )
+        )"),
+
+        // Maps a content hash to the id the backend assigned it in a group, so
+        // routine operations skip a registration round trip.
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS remote_files (
+                group_id       INTEGER NOT NULL,
+                content_hash   TEXT    NOT NULL,
+                remote_file_id INTEGER NOT NULL,
+                PRIMARY KEY (group_id, content_hash)
             )
         )"),
 
         // Performance indexes
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_folder ON pdf_files(folder_path)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_opened ON pdf_files(last_opened)"),
-        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_file_notes_pdf ON file_notes(pdf_id)"),
     };
 
     for (const QString& stmt : ddl) {
@@ -173,6 +139,22 @@ bool DatabaseManager::createSchema()
             return false;
         }
     }
+
+    // Drop the tables from the retired GitHub/Backblaze sync so old installs
+    // stop carrying credentials we no longer use.
+    const QStringList retired = {
+        QStringLiteral("DROP TABLE IF EXISTS file_uploads"),
+        QStringLiteral("DROP TABLE IF EXISTS file_group_settings"),
+        QStringLiteral("DROP TABLE IF EXISTS file_notes"),
+        QStringLiteral("DROP TABLE IF EXISTS file_group_members"),
+        QStringLiteral("DROP TABLE IF EXISTS file_groups"),
+        QStringLiteral("DELETE FROM settings WHERE key = 'githubUser'"),
+    };
+    for (const QString& stmt : retired) {
+        if (!q.exec(stmt))
+            qWarning() << "Could not drop retired table:" << q.lastError().text();
+    }
+
     return true;
 }
 
@@ -389,262 +371,91 @@ bool DatabaseManager::setSetting(const QString& key, const QVariant& value)
     return q.exec();
 }
 
-// ── Groups and notes ──────────────────────────────────────────────────────────
+// ── Content-hash cache ────────────────────────────────────────────────────────
 
-static FileGroup readGroup(const QSqlQuery& q)
-{
-    FileGroup g;
-    g.id = q.value(0).toInt();
-    g.name = q.value(1).toString();
-    g.githubRepoUrl = q.value(2).toString();
-    g.githubStatus = q.value(3).toString();
-    g.githubValidatedAt = QDateTime::fromString(q.value(4).toString(), Qt::ISODate);
-    g.b2KeyId = q.value(5).toString();
-    g.b2BucketName = q.value(6).toString();
-    g.b2AccountId = q.value(7).toString();
-    g.b2Status = q.value(8).toString();
-    g.b2ValidatedAt = QDateTime::fromString(q.value(9).toString(), Qt::ISODate);
-    return g;
-}
-
-QList<FileGroup> DatabaseManager::loadGroups() const
-{
-    QList<FileGroup> groups;
-    QSqlQuery q(QStringLiteral(R"(
-        SELECT id, name, github_repo_url, github_status, github_validated_at,
-               b2_key_id, b2_bucket_name, b2_account_id, b2_status, b2_validated_at
-        FROM file_groups
-        ORDER BY name COLLATE NOCASE
-    )"), m_db);
-    while (q.next())
-        groups.append(readGroup(q));
-    return groups;
-}
-
-FileGroup DatabaseManager::groupById(int groupId) const
+QString DatabaseManager::cachedHash(const QString& path, qint64 fileSize,
+                                    const QDateTime& modified) const
 {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(R"(
-        SELECT id, name, github_repo_url, github_status, github_validated_at,
-               b2_key_id, b2_bucket_name, b2_account_id, b2_status, b2_validated_at
-        FROM file_groups
-        WHERE id = :id
+        SELECT content_hash FROM file_hashes
+        WHERE path = :p AND file_size = :s AND last_modified = :m
     )"));
-    q.bindValue(QStringLiteral(":id"), groupId);
+    q.bindValue(QStringLiteral(":p"), path);
+    q.bindValue(QStringLiteral(":s"), fileSize);
+    q.bindValue(QStringLiteral(":m"), modified.toString(Qt::ISODate));
     if (q.exec() && q.next())
-        return readGroup(q);
+        return q.value(0).toString();
     return {};
 }
 
-int DatabaseManager::createGroup(const QString& name)
+bool DatabaseManager::storeHash(const QString& path, const QString& contentHash,
+                                qint64 fileSize, const QDateTime& modified)
 {
-    const QString trimmed = name.trimmed();
-    if (trimmed.isEmpty()) return -1;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        INSERT INTO file_hashes (path, content_hash, file_size, last_modified)
+        VALUES (:p, :h, :s, :m)
+        ON CONFLICT(path) DO UPDATE SET
+            content_hash  = excluded.content_hash,
+            file_size     = excluded.file_size,
+            last_modified = excluded.last_modified
+    )"));
+    q.bindValue(QStringLiteral(":p"), path);
+    q.bindValue(QStringLiteral(":h"), contentHash);
+    q.bindValue(QStringLiteral(":s"), fileSize);
+    q.bindValue(QStringLiteral(":m"), modified.toString(Qt::ISODate));
+    return q.exec();
+}
+
+// ── Remote id cache ───────────────────────────────────────────────────────────
+
+int DatabaseManager::remoteFileId(int groupId, const QString& contentHash) const
+{
+    if (contentHash.isEmpty()) return -1;
 
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("INSERT OR IGNORE INTO file_groups (name) VALUES (:name)"));
-    q.bindValue(QStringLiteral(":name"), trimmed);
-    if (!q.exec()) return -1;
-
-    QSqlQuery idq(m_db);
-    idq.prepare(QStringLiteral("SELECT id FROM file_groups WHERE name = :name COLLATE NOCASE"));
-    idq.bindValue(QStringLiteral(":name"), trimmed);
-    if (idq.exec() && idq.next())
-        return idq.value(0).toInt();
+    q.prepare(QStringLiteral(R"(
+        SELECT remote_file_id FROM remote_files
+        WHERE group_id = :g AND content_hash = :h
+    )"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    q.bindValue(QStringLiteral(":h"), contentHash);
+    if (q.exec() && q.next())
+        return q.value(0).toInt();
     return -1;
 }
 
-bool DatabaseManager::deleteGroup(int groupId)
-{
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("DELETE FROM file_groups WHERE id = :id"));
-    q.bindValue(QStringLiteral(":id"), groupId);
-    return q.exec();
-}
-
-bool DatabaseManager::renameGroup(int groupId, const QString& newName)
-{
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("UPDATE file_groups SET name = :name WHERE id = :id"));
-    q.bindValue(QStringLiteral(":name"), newName.trimmed());
-    q.bindValue(QStringLiteral(":id"), groupId);
-    return q.exec();
-}
-
-bool DatabaseManager::clearGroupMembers(int groupId)
-{
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("DELETE FROM file_group_members WHERE group_id = :g"));
-    q.bindValue(QStringLiteral(":g"), groupId);
-    return q.exec();
-}
-
-bool DatabaseManager::setFileInGroup(int fileId, int groupId, bool tracked)
-{
-    QSqlQuery q(m_db);
-    if (tracked) {
-        q.prepare(QStringLiteral("INSERT OR IGNORE INTO file_group_members (group_id, pdf_id) VALUES (:g, :p)"));
-    } else {
-        q.prepare(QStringLiteral("DELETE FROM file_group_members WHERE group_id = :g AND pdf_id = :p"));
-    }
-    q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":p"), fileId);
-    return q.exec();
-}
-
-QList<int> DatabaseManager::fileGroupIds(int fileId) const
-{
-    QList<int> ids;
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT group_id FROM file_group_members WHERE pdf_id = :p"));
-    q.bindValue(QStringLiteral(":p"), fileId);
-    q.exec();
-    while (q.next())
-        ids.append(q.value(0).toInt());
-    return ids;
-}
-
-bool DatabaseManager::saveGroupGithubValidation(int groupId, const QString& repoUrl, const QString& status)
+bool DatabaseManager::storeRemoteFileId(int groupId, const QString& contentHash,
+                                        int remoteFileId)
 {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(R"(
-        UPDATE file_groups
-        SET github_repo_url = :url,
-            github_status = :status,
-            github_validated_at = :at
-        WHERE id = :id
-    )"));
-    q.bindValue(QStringLiteral(":url"), repoUrl.trimmed());
-    q.bindValue(QStringLiteral(":status"), status);
-    q.bindValue(QStringLiteral(":at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
-    q.bindValue(QStringLiteral(":id"), groupId);
-    return q.exec();
-}
-
-bool DatabaseManager::saveGroupB2Validation(int groupId, const QString& keyId, const QString& bucketName,
-                                            const QString& accountId, const QString& status)
-{
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral(R"(
-        UPDATE file_groups
-        SET b2_key_id = :key,
-            b2_bucket_name = :bucket,
-            b2_account_id = :account,
-            b2_status = :status,
-            b2_validated_at = :at
-        WHERE id = :id
-    )"));
-    q.bindValue(QStringLiteral(":key"), keyId.trimmed());
-    q.bindValue(QStringLiteral(":bucket"), bucketName.trimmed());
-    q.bindValue(QStringLiteral(":account"), accountId);
-    q.bindValue(QStringLiteral(":status"), status);
-    q.bindValue(QStringLiteral(":at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
-    q.bindValue(QStringLiteral(":id"), groupId);
-    return q.exec();
-}
-
-bool DatabaseManager::wasFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified) const
-{
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral(R"(
-        SELECT 1 FROM file_uploads
-        WHERE group_id = :g AND pdf_id = :p AND file_size = :s AND last_modified = :m
+        INSERT INTO remote_files (group_id, content_hash, remote_file_id)
+        VALUES (:g, :h, :r)
+        ON CONFLICT(group_id, content_hash) DO UPDATE SET
+            remote_file_id = excluded.remote_file_id
     )"));
     q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":p"), fileId);
-    q.bindValue(QStringLiteral(":s"), fileSize);
-    q.bindValue(QStringLiteral(":m"), modified.toString(Qt::ISODate));
-    return q.exec() && q.next();
-}
-
-bool DatabaseManager::markFileUploaded(int groupId, int fileId, qint64 fileSize, const QDateTime& modified,
-                                       const QString& b2FileId)
-{
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral(R"(
-        INSERT INTO file_uploads
-            (group_id, pdf_id, file_size, last_modified, b2_file_id, uploaded_at)
-        VALUES (:g, :p, :s, :m, :b2, :at)
-        ON CONFLICT(group_id, pdf_id) DO UPDATE SET
-            file_size = excluded.file_size,
-            last_modified = excluded.last_modified,
-            b2_file_id = excluded.b2_file_id,
-            uploaded_at = excluded.uploaded_at
-    )"));
-    q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":p"), fileId);
-    q.bindValue(QStringLiteral(":s"), fileSize);
-    q.bindValue(QStringLiteral(":m"), modified.toString(Qt::ISODate));
-    q.bindValue(QStringLiteral(":b2"), b2FileId);
-    q.bindValue(QStringLiteral(":at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    q.bindValue(QStringLiteral(":h"), contentHash);
+    q.bindValue(QStringLiteral(":r"), remoteFileId);
     return q.exec();
 }
 
-QList<FileNote> DatabaseManager::loadNotes(int fileId) const
+bool DatabaseManager::forgetRemoteFile(int groupId, const QString& contentHash)
 {
-    QList<FileNote> notes;
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral(R"(
-        SELECT id, pdf_id, author, body, created_at
-        FROM file_notes
-        WHERE pdf_id = :p
-        ORDER BY created_at DESC, id DESC
-    )"));
-    q.bindValue(QStringLiteral(":p"), fileId);
-    q.exec();
-    while (q.next()) {
-        FileNote note;
-        note.id = q.value(0).toInt();
-        note.fileId = q.value(1).toInt();
-        note.author = q.value(2).toString();
-        note.body = q.value(3).toString();
-        note.createdAt = QDateTime::fromString(q.value(4).toString(), Qt::ISODate);
-        notes.append(note);
-    }
-    return notes;
-}
-
-bool DatabaseManager::addNote(int fileId, const QString& author, const QString& body)
-{
-    const QString trimmed = body.trimmed();
-    if (fileId <= 0 || author.trimmed().isEmpty() || trimmed.isEmpty())
-        return false;
-
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral(R"(
-        INSERT INTO file_notes (pdf_id, author, body, created_at)
-        VALUES (:p, :author, :body, :at)
-    )"));
-    q.bindValue(QStringLiteral(":p"), fileId);
-    q.bindValue(QStringLiteral(":author"), author.trimmed());
-    q.bindValue(QStringLiteral(":body"), trimmed);
-    q.bindValue(QStringLiteral(":at"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+    q.prepare(QStringLiteral(
+        "DELETE FROM remote_files WHERE group_id = :g AND content_hash = :h"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    q.bindValue(QStringLiteral(":h"), contentHash);
     return q.exec();
 }
 
-bool DatabaseManager::saveGroupSetting(int groupId, const QString& key, const QString& value)
+bool DatabaseManager::clearRemoteCache()
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral(R"(
-        INSERT INTO file_group_settings (group_id, key, value)
-        VALUES (:g, :k, :v)
-        ON CONFLICT(group_id, key) DO UPDATE SET value = excluded.value
-    )"));
-    q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":k"), key);
-    q.bindValue(QStringLiteral(":v"), value);
-    return q.exec();
-}
-
-QString DatabaseManager::getGroupSetting(int groupId, const QString& key, const QString& defaultValue) const
-{
-    QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("SELECT value FROM file_group_settings WHERE group_id = :g AND key = :k"));
-    q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":k"), key);
-    if (q.exec() && q.next())
-        return q.value(0).toString();
-    return defaultValue;
+    return q.exec(QStringLiteral("DELETE FROM remote_files"));
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
