@@ -1,0 +1,19 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "bcrypt>=5.0.0",
+    "fastapi>=0.140.13",
+    "httpx>=0.28.1",
+    "psycopg>=3.3.4",
+    "pydantic[email]>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "pyjwt>=2.13.0",
+    "pytest>=9.1.1",
+    "python-multipart>=0.0.32",
+    "sqlalchemy>=2.0.51",
+    "uvicorn>=0.51.0",
+]
