@@ -1,2 +1,4 @@
 **/build/
 .aider*
+
+**/__pycache__/

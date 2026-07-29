@@ -20,6 +20,9 @@ set(SOURCES
     src/main.cpp
     src/mainwindow.cpp
 
+    src/api/apiclient.cpp
+    src/api/apitypes.cpp
+
     src/models/pdffile.cpp
     src/models/pdfmodel.cpp
     src/models/tagmodel.cpp
@@ -37,6 +40,7 @@ set(SOURCES
     src/views/recentview.cpp
     src/views/tagmanagerdialog.cpp
     src/views/settingsdialog.cpp
+    src/views/logindialog.cpp
 
     src/delegates/listdelegate.cpp
     src/delegates/griddelegate.cpp
@@ -50,6 +54,8 @@ set(SOURCES
 
 set(HEADERS
     src/mainwindow.h
+    src/api/apiclient.h
+    src/api/apitypes.h
     src/models/pdffile.h
     src/models/pdfmodel.h
     src/models/tagmodel.h
@@ -64,6 +70,7 @@ set(HEADERS
     src/views/recentview.h
     src/views/tagmanagerdialog.h
     src/views/settingsdialog.h
+    src/views/logindialog.h
     src/delegates/listdelegate.h
     src/delegates/griddelegate.h
     src/utils/pdfopener.h
@@ -97,6 +104,25 @@ if(WIN32)
     set_target_properties(PDFOrganizer PROPERTIES WIN32_EXECUTABLE TRUE)
 elseif(APPLE)
     set_target_properties(PDFOrganizer PROPERTIES MACOSX_BUNDLE TRUE)
+endif()
+
+# ── API smoke test ────────────────────────────────────────────────────────────
+# Exercises ApiClient against a running backend. Off by default because it
+# needs a live server:
+#   cmake -S . -B build -DBUILD_API_SMOKETEST=ON
+#   ./build/apiclient_smoketest http://localhost:8000
+option(BUILD_API_SMOKETEST "Build the ApiClient integration smoke test" OFF)
+
+if(BUILD_API_SMOKETEST)
+    add_executable(apiclient_smoketest
+        tests/apiclient_smoketest.cpp
+        src/api/apiclient.cpp
+        src/api/apitypes.cpp
+        src/api/apiclient.h
+        src/api/apitypes.h
+    )
+    target_include_directories(apiclient_smoketest PRIVATE src)
+    target_link_libraries(apiclient_smoketest PRIVATE Qt6::Core Qt6::Network)
 endif()
 
 # ── Install ───────────────────────────────────────────────────────────────────
