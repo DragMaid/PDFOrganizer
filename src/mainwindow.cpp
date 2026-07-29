@@ -2,7 +2,10 @@
 
 // ── Models
 // ────────────────────────────────────────────────────────────────────
+#include "models/foldermodel.h"
 #include "models/pdfmodel.h"
+#include "models/tagmodel.h"
+#include "utils/searchfilterproxy.h"
 
 // ── Infrastructure
 // ────────────────────────────────────────────────────────────
@@ -11,11 +14,16 @@
 #include "controllers/tagcontroller.h"
 #include "database/databasemanager.h"
 
+// ── Backend
+// ───────────────────────────────────────────────────────────────────
+#include "api/apiclient.h"
+
 // ── Views
 // ─────────────────────────────────────────────────────────────────────
 #include "views/folderpanel.h"
 #include "views/gridview.h"
 #include "views/listview.h"
+#include "views/logindialog.h"
 #include "views/recentview.h"
 #include "views/settingsdialog.h"
 #include "views/tagmanagerdialog.h"
@@ -25,24 +33,17 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
-#include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
-#include <QCryptographicHash>
 #include <QDebug>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
-#include <QEventLoop>
-#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -50,12 +51,8 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QProcess>
-#include <QProcessEnvironment>
+#include <QProgressDialog>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QScrollArea>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -64,92 +61,11 @@
 #include <QStatusBar>
 #include <QStringList>
 #include <QTabWidget>
-#include <QTemporaryDir>
 #include <QTextEdit>
 #include <QTimer>
 #include <QToolBar>
 #include <QUrl>
-#include <QUrlQuery>
 #include <QVBoxLayout>
-
-static QString groupSlug(QString name) {
-  name = name.toLower();
-  name.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")),
-               QStringLiteral("-"));
-  name = name.trimmed();
-  while (name.startsWith(QLatin1Char('-')))
-    name.remove(0, 1);
-  while (name.endsWith(QLatin1Char('-')))
-    name.chop(1);
-  return name.isEmpty() ? QStringLiteral("group") : name;
-}
-
-static bool githubRepoParts(const QString &repoUrl, QString *owner,
-                            QString *repo) {
-  const QString url = repoUrl.trimmed();
-
-  // Accept common GitHub URL forms:
-  //  - https://github.com/owner/repo or https://github.com/owner/repo.git
-  //  - git@github.com:owner/repo.git
-  //  - ssh://git@github.com/owner/repo.git
-  const QRegularExpression httpsRe(
-      QStringLiteral("^https://github\\.com/([^/]+)/([^/.]+)(?:\\.git)?/?$"));
-  QRegularExpressionMatch match = httpsRe.match(url);
-  if (match.hasMatch()) {
-    *owner = match.captured(1);
-    *repo = match.captured(2);
-    return true;
-  }
-
-  const QRegularExpression sshShortRe(
-      QStringLiteral("^git@github\\.com:([^/]+)/([^/.]+)(?:\\.git)?$"));
-  match = sshShortRe.match(url);
-  if (match.hasMatch()) {
-    *owner = match.captured(1);
-    *repo = match.captured(2);
-    return true;
-  }
-
-  const QRegularExpression sshUrlRe(
-      QStringLiteral("^ssh://git@github\\.com/([^/]+)/([^/.]+)(?:\\.git)?/?$"));
-  match = sshUrlRe.match(url);
-  if (match.hasMatch()) {
-    *owner = match.captured(1);
-    *repo = match.captured(2);
-    return true;
-  }
-
-  return false;
-}
-
-static QNetworkReply *blockingGet(QNetworkAccessManager &nam,
-                                  const QNetworkRequest &req) {
-  QNetworkReply *reply = nam.get(req);
-  QEventLoop loop;
-  QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-  loop.exec();
-  return reply;
-}
-
-static QNetworkReply *blockingPut(QNetworkAccessManager &nam,
-                                  const QNetworkRequest &req,
-                                  const QByteArray &body) {
-  QNetworkReply *reply = nam.put(req, body);
-  QEventLoop loop;
-  QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-  loop.exec();
-  return reply;
-}
-
-static QNetworkReply *blockingPost(QNetworkAccessManager &nam,
-                                   const QNetworkRequest &req,
-                                   const QByteArray &body) {
-  QNetworkReply *reply = nam.post(req, body);
-  QEventLoop loop;
-  QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-  loop.exec();
-  return reply;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Construction
@@ -178,6 +94,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
   // Restore window geometry + dark mode
   restoreLayout();
+
+  // Connect to the backend once the window is up, so any sign-in sheet has a
+  // parent to centre on.
+  QTimer::singleShot(0, this, &MainWindow::restoreSessionOrPrompt);
 }
 
 MainWindow::~MainWindow() {
@@ -208,6 +128,8 @@ void MainWindow::initControllers() {
         QStringLiteral("Could not open the application database.\n") +
             dbPath());
   }
+
+  m_api = new ApiClient(this);
 
   m_watcher = new FolderWatcher(this);
   m_pdfCtrl = new PdfController(m_pdfModel, m_db, m_watcher, this);
@@ -256,6 +178,20 @@ void MainWindow::initToolBar() {
   m_searchEdit->setMinimumWidth(260);
   m_searchEdit->setMaximumWidth(400);
   tb->addWidget(m_searchEdit);
+
+  tb->addSeparator();
+
+  // ── Active group ──────────────────────────────────────────────────────────
+  // The permission context for everything shared: tags land in this group's
+  // vocabulary and notes are visible to exactly this group's members.
+  tb->addWidget(new QLabel(QStringLiteral(" Group: "), this));
+  m_groupCombo = new QComboBox(this);
+  m_groupCombo->setMinimumWidth(160);
+  m_groupCombo->setToolTip(
+      QStringLiteral("Tags and notes you add apply to this group"));
+  tb->addWidget(m_groupCombo);
+  connect(m_groupCombo, &QComboBox::currentIndexChanged, this,
+          &MainWindow::onActiveGroupChanged);
 
   tb->addSeparator();
 
@@ -309,6 +245,14 @@ void MainWindow::initMenuBar() {
 
   fileMenu->addSeparator();
 
+  m_signInAction = fileMenu->addAction(QStringLiteral("&Sign In…"));
+  connect(m_signInAction, &QAction::triggered, this, &MainWindow::promptSignIn);
+
+  m_signOutAction = fileMenu->addAction(QStringLiteral("Sign &Out"));
+  connect(m_signOutAction, &QAction::triggered, this, &MainWindow::onSignOut);
+
+  fileMenu->addSeparator();
+
   QAction *quitAct = fileMenu->addAction(QStringLiteral("&Quit"));
   quitAct->setShortcut(QKeySequence::Quit);
   connect(quitAct, &QAction::triggered, this, &QWidget::close);
@@ -356,9 +300,11 @@ void MainWindow::initStatusBar() {
   m_statusLabel = new QLabel(QStringLiteral("0 files"), this);
   m_scanLabel = new QLabel(this);
   m_scanLabel->setObjectName(QStringLiteral("scanLabel"));
+  m_userLabel = new QLabel(QStringLiteral("Not signed in"), this);
 
   statusBar()->addWidget(m_statusLabel);
   statusBar()->addPermanentWidget(m_scanLabel);
+  statusBar()->addPermanentWidget(m_userLabel);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -435,6 +381,11 @@ void MainWindow::connectSignals() {
   connect(m_folderModel, &FolderModel::folderRemoved, m_folderTreeModel,
           &FolderTreeModel::removeRootFolder);
 
+  // Backend — any failure without a dedicated handler surfaces as a modal.
+  connect(m_api, &ApiClient::errorOccurred, this, &MainWindow::onApiError);
+  connect(m_api, &ApiClient::sessionExpired, this,
+          &MainWindow::onSessionExpired);
+
   // Tag model changes → refresh folder panel chips
   connect(m_tagModel, &QAbstractItemModel::modelReset, m_folderPanel,
           &FolderPanel::refresh);
@@ -510,6 +461,8 @@ void MainWindow::onFileActivated(const QString &filePath) {
 
 void MainWindow::onFileSelected(const QString &filePath) {
   m_selectedFilePath = filePath;
+  m_notes.clear();
+  m_selectedFileGroups.clear();
   refreshDetailPane();
   if (m_rightTabs)
     m_rightTabs->setCurrentIndex(0);
@@ -520,26 +473,36 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
   if (!f.isValid())
     return;
 
+  const int groupId = activeGroupId();
+  if (groupId < 0) {
+    QMessageBox::information(
+        this, QStringLiteral("Sign In Required"),
+        QStringLiteral("Sign in and pick a group before editing tags."));
+    return;
+  }
+
   // Build a simple tag-assignment dialog
   QDialog dlg(this);
   dlg.setWindowTitle(QStringLiteral("Edit Tags — %1").arg(f.fileName));
   dlg.setMinimumWidth(320);
 
   auto *layout = new QVBoxLayout(&dlg);
-  layout->addWidget(
-      new QLabel(QStringLiteral("Select tags for this file:"), &dlg));
+  layout->addWidget(new QLabel(
+      QStringLiteral("Tags for this file in '%1':").arg(activeGroup().name),
+      &dlg));
 
   auto *listWidget = new QListWidget(&dlg);
-  listWidget->setSelectionMode(QAbstractItemView::MultiSelection);
-
   const QStringList allTags = m_tagModel->allTags();
   for (const QString &tag : allTags) {
     auto *item = new QListWidgetItem(tag, listWidget);
     item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
     item->setCheckState(f.hasTag(tag) ? Qt::Checked : Qt::Unchecked);
   }
-
   layout->addWidget(listWidget);
+
+  auto *newTagEdit = new QLineEdit(&dlg);
+  newTagEdit->setPlaceholderText(QStringLiteral("Add a new tag…"));
+  layout->addWidget(newTagEdit);
 
   auto *buttons = new QDialogButtonBox(
       QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
@@ -556,8 +519,26 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
     if (item->checkState() == Qt::Checked)
       selected << item->text();
   }
+  const QString extra = newTagEdit->text().trimmed();
+  if (!extra.isEmpty() && !selected.contains(extra, Qt::CaseInsensitive))
+    selected << extra;
 
-  m_tagCtrl->setFileTags(filePath, selected);
+  // The backend creates any missing tags and treats a tag another member
+  // already applied as a no-op, so there is nothing to reconcile here.
+  resolveRemoteFile(groupId, filePath, [this, groupId, filePath,
+                                        selected](int remoteFileId) {
+    m_api->setFileTags(
+        groupId, remoteFileId, selected,
+        [this, filePath](const QList<ApiTag> &tags) {
+          QStringList names;
+          for (const ApiTag &tag : tags)
+            names << tag.name;
+
+          m_tagCtrl->applyRemoteFileTags(filePath, names);
+          reloadTagVocabulary();
+          refreshDetailPane();
+        });
+  });
 }
 
 void MainWindow::onPdfOpened(const QString & /*filePath*/,
@@ -566,640 +547,797 @@ void MainWindow::onPdfOpened(const QString & /*filePath*/,
   updateStatusBar();
 }
 
-void MainWindow::onAddNote() {
-  const PdfFile f = m_pdfModel->fileByPath(m_selectedFilePath);
-  if (!f.isValid())
-    return;
+// ─────────────────────────────────────────────────────────────────────────────
+//  Session
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const QString author =
-      m_db->getSetting(QStringLiteral("githubUser"), QStringLiteral("local"))
-          .toString()
-          .trimmed();
-  if (author.isEmpty()) {
-    QMessageBox::warning(
-        this, QStringLiteral("GitHub User Required"),
-        QStringLiteral(
-            "Set your GitHub username in Settings before adding notes."));
+void MainWindow::restoreSessionOrPrompt() {
+  const QString server =
+      m_db->getSetting(QStringLiteral("serverUrl")).toString().trimmed();
+  const QString refreshToken =
+      m_db->getSetting(QStringLiteral("refreshToken")).toString();
+
+  if (server.isEmpty() || refreshToken.isEmpty()) {
+    promptSignIn();
     return;
   }
 
-  if (m_db->addNote(f.id, author, m_noteEdit->toPlainText())) {
-    m_noteEdit->clear();
+  m_api->setBaseUrl(QUrl(server));
+
+  ApiUser saved;
+  saved.id = m_db->getSetting(QStringLiteral("userId"), -1).toInt();
+  saved.email = m_db->getSetting(QStringLiteral("userEmail")).toString();
+  saved.displayName =
+      m_db->getSetting(QStringLiteral("userDisplayName")).toString();
+  m_api->restoreSession(refreshToken, saved);
+
+  // Spend the stored refresh token for a live session. A failure here is
+  // ordinary (the token expired), so it prompts rather than alarming the user.
+  m_api->refreshSession([this]() { onSignedIn(); },
+                        [this](const ApiError &error) {
+                          clearSavedSession();
+                          if (error.isNetworkFailure())
+                            showError(error);
+                          promptSignIn();
+                        });
+}
+
+void MainWindow::promptSignIn() {
+  if (m_signingIn)
+    return;
+  m_signingIn = true;
+
+  LoginDialog dlg(m_api, this);
+  dlg.setServerUrl(m_db->getSetting(QStringLiteral("serverUrl"),
+                                    QStringLiteral("http://localhost:8000"))
+                       .toString());
+  dlg.setEmail(m_db->getSetting(QStringLiteral("userEmail")).toString());
+
+  const bool accepted = dlg.exec() == QDialog::Accepted;
+  m_signingIn = false;
+
+  if (!accepted) {
+    // Declining is allowed: local browsing keeps working, everything shared
+    // is disabled until they sign in from the File menu.
+    setCollaborationEnabled(false);
+    m_userLabel->setText(QStringLiteral("Not signed in"));
+    return;
+  }
+
+  m_db->setSetting(QStringLiteral("serverUrl"), dlg.serverUrl());
+  m_db->setSetting(QStringLiteral("staySignedIn"), dlg.shouldStaySignedIn());
+  onSignedIn();
+}
+
+void MainWindow::onSignedIn() {
+  const ApiUser user = m_api->currentUser();
+  m_userLabel->setText(
+      QStringLiteral("%1 · %2").arg(user.displayName, m_api->baseUrl().host()));
+  saveSession();
+  setCollaborationEnabled(true);
+
+  reloadGroups([this]() {
+    reloadTagVocabulary();
     refreshDetailPane();
+  });
+}
+
+void MainWindow::saveSession() {
+  const ApiUser user = m_api->currentUser();
+  m_db->setSetting(QStringLiteral("userId"), user.id);
+  m_db->setSetting(QStringLiteral("userEmail"), user.email);
+  m_db->setSetting(QStringLiteral("userDisplayName"), user.displayName);
+
+  // Only persist the refresh token if the user asked to stay signed in.
+  if (m_db->getSetting(QStringLiteral("staySignedIn"), true).toBool())
+    m_db->setSetting(QStringLiteral("refreshToken"), m_api->refreshToken());
+  else
+    m_db->setSetting(QStringLiteral("refreshToken"), QString{});
+}
+
+void MainWindow::clearSavedSession() {
+  m_db->setSetting(QStringLiteral("refreshToken"), QString{});
+  m_db->clearRemoteCache();
+}
+
+void MainWindow::onSignOut() {
+  m_api->clearSession();
+  clearSavedSession();
+
+  m_groups.clear();
+  m_notes.clear();
+  m_selectedFileGroups.clear();
+  m_activeGroupId = -1;
+
+  {
+    const QSignalBlocker blocker(m_groupCombo);
+    m_groupCombo->clear();
   }
+  m_userLabel->setText(QStringLiteral("Not signed in"));
+  setCollaborationEnabled(false);
+  refreshDetailPane();
+}
+
+void MainWindow::onSessionExpired() {
+  clearSavedSession();
+  setCollaborationEnabled(false);
+  m_userLabel->setText(QStringLiteral("Not signed in"));
+  promptSignIn();
+}
+
+void MainWindow::onApiError(const ApiError &error) { showError(error); }
+
+void MainWindow::showError(const ApiError &error) {
+  QMessageBox box(this);
+  box.setIcon(error.httpStatus == 403 || error.httpStatus == 409
+                  ? QMessageBox::Warning
+                  : QMessageBox::Critical);
+  box.setWindowTitle(error.title());
+  box.setText(error.message);
+  box.setStandardButtons(QMessageBox::Ok);
+  box.exec();
+}
+
+void MainWindow::setCollaborationEnabled(bool enabled) {
+  m_groupCombo->setEnabled(enabled);
+  if (m_signInAction)
+    m_signInAction->setEnabled(!enabled);
+  if (m_signOutAction)
+    m_signOutAction->setEnabled(enabled);
+  refreshDetailPane();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Backend helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MainWindow::reloadGroups(std::function<void()> onDone) {
+  if (!m_api->isAuthenticated()) {
+    if (onDone)
+      onDone();
+    return;
+  }
+
+  m_api->listGroups([this, onDone](const QList<ApiGroup> &groups) {
+    m_groups = groups;
+
+    const int previous = m_activeGroupId;
+    {
+      const QSignalBlocker blocker(m_groupCombo);
+      m_groupCombo->clear();
+      for (const ApiGroup &group : m_groups)
+        m_groupCombo->addItem(group.name, group.id);
+    }
+
+    // Keep the user on the group they were using; fall back to their personal
+    // one, which always exists.
+    int index = m_groupCombo->findData(previous);
+    if (index < 0) {
+      const int remembered =
+          m_db->getSetting(QStringLiteral("activeGroupId"), -1).toInt();
+      index = m_groupCombo->findData(remembered);
+    }
+    if (index < 0) {
+      for (int i = 0; i < m_groups.size(); ++i) {
+        if (m_groups.at(i).isPersonal) {
+          index = i;
+          break;
+        }
+      }
+    }
+    if (index < 0 && !m_groups.isEmpty())
+      index = 0;
+
+    if (index >= 0) {
+      const QSignalBlocker blocker(m_groupCombo);
+      m_groupCombo->setCurrentIndex(index);
+      m_activeGroupId = m_groupCombo->itemData(index).toInt();
+      m_db->setSetting(QStringLiteral("activeGroupId"), m_activeGroupId);
+    } else {
+      m_activeGroupId = -1;
+    }
+
+    if (onDone)
+      onDone();
+  });
+}
+
+void MainWindow::reloadTagVocabulary() {
+  if (!m_api->isAuthenticated())
+    return;
+
+  // The sidebar shows one vocabulary drawn from every group the user belongs
+  // to, even though storage is partitioned per group.
+  m_api->listAllTags([this](const QList<ApiTag> &tags) {
+    QStringList names;
+    for (const ApiTag &tag : tags) {
+      if (!names.contains(tag.name, Qt::CaseInsensitive))
+        names << tag.name;
+    }
+    m_tagCtrl->applyRemoteVocabulary(names);
+  });
+}
+
+QString MainWindow::contentHashFor(const QString &filePath) {
+  const QFileInfo info(filePath);
+  if (!info.exists())
+    return {};
+
+  const QString cached =
+      m_db->cachedHash(filePath, info.size(), info.lastModified());
+  if (!cached.isEmpty())
+    return cached;
+
+  const QString hash = ApiClient::hashFile(filePath);
+  if (!hash.isEmpty())
+    m_db->storeHash(filePath, hash, info.size(), info.lastModified());
+  return hash;
+}
+
+void MainWindow::resolveRemoteFile(int groupId, const QString &filePath,
+                                   std::function<void(int)> onReady) {
+  if (groupId < 0 || !m_api->isAuthenticated())
+    return;
+
+  const QString hash = contentHashFor(filePath);
+  if (hash.isEmpty()) {
+    showError(ApiError::network(
+        QStringLiteral("Could not read %1 to identify it.")
+            .arg(QFileInfo(filePath).fileName())));
+    return;
+  }
+
+  const int cached = m_db->remoteFileId(groupId, hash);
+  if (cached >= 0) {
+    onReady(cached);
+    return;
+  }
+
+  const PdfFile local = m_pdfModel->fileByPath(filePath);
+  const QFileInfo info(filePath);
+
+  // Registration is idempotent on the backend: if another member already
+  // added this exact PDF we get their record back instead of an error.
+  m_api->registerFile(
+      groupId, hash, info.fileName(), info.size(), local.pageCount,
+      [this, groupId, hash, onReady](const ApiFile &file) {
+        m_db->storeRemoteFileId(groupId, hash, file.id);
+        onReady(file.id);
+      });
+}
+
+int MainWindow::activeGroupId() const { return m_activeGroupId; }
+
+ApiGroup MainWindow::activeGroup() const { return groupById(m_activeGroupId); }
+
+ApiGroup MainWindow::groupById(int groupId) const {
+  for (const ApiGroup &group : m_groups) {
+    if (group.id == groupId)
+      return group;
+  }
+  return {};
+}
+
+int MainWindow::selectedGroupId() const {
+  QListWidgetItem *item = m_groupList ? m_groupList->currentItem() : nullptr;
+  return item ? item->data(Qt::UserRole).toInt() : -1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Notes
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MainWindow::onAddNote() {
+  const QString body = m_noteEdit->toPlainText().trimmed();
+  if (body.isEmpty())
+    return;
+
+  const int groupId = activeGroupId();
+  if (groupId < 0 || m_selectedFilePath.isEmpty())
+    return;
+
+  resolveRemoteFile(groupId, m_selectedFilePath,
+                    [this, groupId, body](int remoteFileId) {
+                      m_api->createNote(groupId, remoteFileId, body,
+                                        [this](const ApiNote &) {
+                                          m_noteEdit->clear();
+                                          refreshNotes();
+                                        });
+                    });
+}
+
+void MainWindow::refreshNotes() {
+  // Clear the existing bubbles first so a failed reload does not leave stale
+  // notes on screen.
+  while (QLayoutItem *item = m_notesLayout->takeAt(0)) {
+    delete item->widget();
+    delete item;
+  }
+
+  const int groupId = activeGroupId();
+  const PdfFile file = m_pdfModel->fileByPath(m_selectedFilePath);
+  if (groupId < 0 || !file.isValid() || !m_api->isAuthenticated()) {
+    m_notes.clear();
+    m_notesLayout->addStretch();
+    return;
+  }
+
+  const QString hash = contentHashFor(m_selectedFilePath);
+  const int remoteFileId =
+      hash.isEmpty() ? -1 : m_db->remoteFileId(groupId, hash);
+  if (remoteFileId < 0) {
+    // Not registered in this group yet — there cannot be notes, and we should
+    // not register a file just because it was clicked on.
+    m_notes.clear();
+    m_notesLayout->addStretch();
+    return;
+  }
+
+  const QString pathAtRequest = m_selectedFilePath;
+  m_api->listNotes(
+      groupId, remoteFileId,
+      [this, pathAtRequest, groupId, remoteFileId](const QList<ApiNote> &notes) {
+        // The user may have clicked elsewhere while this was in flight.
+        if (pathAtRequest != m_selectedFilePath)
+          return;
+
+        m_notes = notes;
+        while (QLayoutItem *item = m_notesLayout->takeAt(0)) {
+          delete item->widget();
+          delete item;
+        }
+
+        for (const ApiNote &note : m_notes)
+          m_notesLayout->addWidget(buildNoteBubble(note));
+
+        m_notesLayout->addStretch();
+      });
+}
+
+QWidget *MainWindow::buildNoteBubble(const ApiNote &note) {
+  auto *bubble = new QWidget;
+  bubble->setObjectName(QStringLiteral("noteBubble"));
+  bubble->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  auto *bl = new QVBoxLayout(bubble);
+  bl->setContentsMargins(10, 8, 10, 8);
+  bl->setSpacing(6);
+
+  auto *headerRow = new QHBoxLayout;
+  auto *header = new QLabel(
+      QStringLiteral("%1 · %2").arg(
+          note.authorName,
+          note.createdAt.toLocalTime().toString(
+              QStringLiteral("yyyy-MM-dd hh:mm"))),
+      bubble);
+  QFont hfont = header->font();
+  hfont.setBold(true);
+  header->setFont(hfont);
+  header->setStyleSheet(QStringLiteral("color: #9fb3ff; font-size: 9pt;"));
+  headerRow->addWidget(header);
+  headerRow->addStretch();
+
+  // Edit and Delete appear only on your own notes. The backend refuses them
+  // for anyone else regardless, so this is presentation, not enforcement.
+  if (note.editable) {
+    auto *editBtn = new QPushButton(QStringLiteral("Edit"), bubble);
+    auto *deleteBtn = new QPushButton(QStringLiteral("Delete"), bubble);
+    for (QPushButton *button : {editBtn, deleteBtn}) {
+      button->setFlat(true);
+      button->setCursor(Qt::PointingHandCursor);
+      button->setStyleSheet(
+          QStringLiteral("padding: 0 6px; font-size: 8pt; color: #8a8d95;"));
+    }
+    headerRow->addWidget(editBtn);
+    headerRow->addWidget(deleteBtn);
+
+    connect(editBtn, &QPushButton::clicked, this,
+            [this, note]() { editNote(note); });
+    connect(deleteBtn, &QPushButton::clicked, this,
+            [this, note]() { deleteNote(note); });
+  }
+  bl->addLayout(headerRow);
+
+  auto *body = new QLabel(note.body, bubble);
+  body->setWordWrap(true);
+  body->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  bl->addWidget(body);
+
+  if (note.version > 1) {
+    auto *edited = new QLabel(
+        QStringLiteral("edited %1")
+            .arg(note.updatedAt.toLocalTime().toString(
+                QStringLiteral("yyyy-MM-dd hh:mm"))),
+        bubble);
+    edited->setStyleSheet(QStringLiteral("color: #6a6d75; font-size: 8pt;"));
+    bl->addWidget(edited);
+  }
+
+  bubble->setStyleSheet(QStringLiteral(
+      "QWidget#noteBubble { background: rgba(77,142,255,0.08); border: 1px "
+      "solid rgba(77,142,255,0.14); border-radius: 8px; }"));
+  return bubble;
+}
+
+void MainWindow::editNote(const ApiNote &note) {
+  QDialog dlg(this);
+  dlg.setWindowTitle(QStringLiteral("Edit Note"));
+  dlg.setMinimumWidth(420);
+
+  auto *layout = new QVBoxLayout(&dlg);
+  auto *editor = new QTextEdit(&dlg);
+  editor->setPlainText(note.body);
+  layout->addWidget(editor);
+
+  auto *buttons = new QDialogButtonBox(
+      QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dlg);
+  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  layout->addWidget(buttons);
+
+  if (dlg.exec() != QDialog::Accepted)
+    return;
+
+  const QString body = editor->toPlainText().trimmed();
+  if (body.isEmpty() || body == note.body)
+    return;
+
+  // Sending the version we displayed means a copy of this note edited
+  // elsewhere in the meantime is reported instead of silently overwritten.
+  m_api->updateNote(
+      note.id, body, note.version, [this](const ApiNote &) { refreshNotes(); },
+      [this, body](const ApiError &error) {
+        if (error.code != QLatin1String(ApiError::StaleNote)) {
+          showError(error);
+          return;
+        }
+
+        const QString current =
+            error.detail.value(QStringLiteral("current_body")).toString();
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Warning);
+        box.setWindowTitle(QStringLiteral("Note Changed Elsewhere"));
+        box.setText(error.message);
+        box.setInformativeText(
+            QStringLiteral("Now saved:\n%1\n\nYour edit:\n%2")
+                .arg(current, body));
+        box.setStandardButtons(QMessageBox::Ok);
+        box.exec();
+        refreshNotes();
+      });
+}
+
+void MainWindow::deleteNote(const ApiNote &note) {
+  const auto reply = QMessageBox::question(
+      this, QStringLiteral("Delete Note"),
+      QStringLiteral("Delete this note? This cannot be undone."),
+      QMessageBox::Yes | QMessageBox::Cancel);
+  if (reply != QMessageBox::Yes)
+    return;
+
+  m_api->deleteNote(note.id, [this]() { refreshNotes(); });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Groups
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MainWindow::onActiveGroupChanged(int index) {
+  if (index < 0)
+    return;
+
+  m_activeGroupId = m_groupCombo->itemData(index).toInt();
+  m_db->setSetting(QStringLiteral("activeGroupId"), m_activeGroupId);
+
+  // Tags and notes are scoped to the group, so both views have to be redrawn.
+  reloadTagVocabulary();
+  refreshDetailPane();
 }
 
 void MainWindow::onCreateGroup() {
-  QDialog dlg(this);
-  dlg.setWindowTitle(QStringLiteral("New Group"));
-  auto *form = new QFormLayout(&dlg);
+  bool ok = false;
+  const QString name = QInputDialog::getText(
+      this, QStringLiteral("New Group"),
+      QStringLiteral("Group name:\n\nYou'll be its owner — you can invite "
+                     "people once it exists."),
+      QLineEdit::Normal, QString{}, &ok);
+  if (!ok || name.trimmed().isEmpty())
+    return;
 
-  QLineEdit nameEdit;
-  QLineEdit folderEdit;
-  QPushButton folderBrowse(QStringLiteral("Browse"));
-  QHBoxLayout folderRow;
-  folderRow.addWidget(&folderEdit);
-  folderRow.addWidget(&folderBrowse);
-
-  QComboBox authCombo;
-  authCombo.addItem(QStringLiteral("None"));
-  authCombo.addItem(QStringLiteral("Token"));
-  authCombo.addItem(QStringLiteral("SSH (use key)"));
-
-  QLineEdit githubToken;
-  githubToken.setEchoMode(QLineEdit::Password);
-  QLineEdit githubSshKey;
-  QPushButton keyBrowse(QStringLiteral("Browse"));
-  QHBoxLayout keyRow;
-  keyRow.addWidget(&githubSshKey);
-  keyRow.addWidget(&keyBrowse);
-
-  QLineEdit b2Token;
-  b2Token.setEchoMode(QLineEdit::Password);
-
-  form->addRow(QStringLiteral("Group name:"), &nameEdit);
-  form->addRow(QStringLiteral("Folder to track:"), &folderRow);
-  form->addRow(QStringLiteral("GitHub auth:"), &authCombo);
-  form->addRow(QStringLiteral("GitHub token:"), &githubToken);
-  form->addRow(QStringLiteral("GitHub SSH key:"), &keyRow);
-  form->addRow(QStringLiteral("B2 auth token:"), &b2Token);
-
-  auto *buttons = new QDialogButtonBox(
-      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-  form->addRow(buttons);
-  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-
-  connect(&folderBrowse, &QPushButton::clicked, this, [&]() {
-    const QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("Select Folder"));
-    if (!dir.isEmpty())
-      folderEdit.setText(dir);
+  m_api->createGroup(name.trimmed(), [this](const ApiGroup &group) {
+    m_activeGroupId = group.id;
+    reloadGroups([this]() {
+      reloadTagVocabulary();
+      refreshDetailPane();
+    });
   });
-  connect(&keyBrowse, &QPushButton::clicked, this, [&]() {
-    const QString fn =
-        QFileDialog::getOpenFileName(this, QStringLiteral("Select SSH Key"));
-    if (!fn.isEmpty())
-      githubSshKey.setText(fn);
-  });
-
-  if (dlg.exec() != QDialog::Accepted)
-    return;
-
-  const QString name = nameEdit.text().trimmed();
-  if (name.isEmpty())
-    return;
-
-  const int gid = m_db->createGroup(name);
-  if (gid < 0) {
-    QMessageBox::warning(this, QStringLiteral("Group Exists"),
-                         QStringLiteral("Could not create that group."));
-    return;
-  }
-
-  // Persist provided settings so user doesn't have to re-enter them.
-  const QString folderPath = folderEdit.text().trimmed();
-  if (!folderPath.isEmpty())
-    m_db->saveGroupSetting(gid, QStringLiteral("folderPath"), folderPath);
-
-  const QString authMethod = authCombo.currentText();
-  if (authMethod != QStringLiteral("None"))
-    m_db->saveGroupSetting(gid, QStringLiteral("githubAuthMethod"), authMethod);
-  if (!githubToken.text().trimmed().isEmpty())
-    m_db->saveGroupSetting(gid, QStringLiteral("githubToken"),
-                           githubToken.text().trimmed());
-  if (!githubSshKey.text().trimmed().isEmpty())
-    m_db->saveGroupSetting(gid, QStringLiteral("githubSshKey"),
-                           githubSshKey.text().trimmed());
-  if (!b2Token.text().trimmed().isEmpty())
-    m_db->saveGroupSetting(gid, QStringLiteral("b2AuthToken"),
-                           b2Token.text().trimmed());
-
-  // If a folder was supplied, automatically include all PDFs under it in the
-  // group.
-  if (!folderPath.isEmpty()) {
-    for (const PdfFile &f : m_pdfModel->allFiles()) {
-      if (f.folderPath.startsWith(folderPath))
-        m_db->setFileInGroup(f.id, gid, true);
-    }
-  }
-
-  refreshDetailPane();
 }
 
-void MainWindow::onEditGroup() {
+void MainWindow::onRenameGroup() {
   const int groupId = selectedGroupId();
-  if (groupId < 0)
+  const ApiGroup group = groupById(groupId);
+  if (!group.isValid())
     return;
 
-  FileGroup group = m_db->groupById(groupId);
+  bool ok = false;
+  const QString name = QInputDialog::getText(
+      this, QStringLiteral("Rename Group"), QStringLiteral("Group name:"),
+      QLineEdit::Normal, group.name, &ok);
+  if (!ok || name.trimmed().isEmpty() || name.trimmed() == group.name)
+    return;
 
-  QDialog dlg(this);
-  dlg.setWindowTitle(QStringLiteral("Edit Group"));
-  auto *form = new QFormLayout(&dlg);
-
-  QLineEdit nameEdit;
-  QLineEdit folderEdit;
-  QPushButton folderBrowse(QStringLiteral("Browse"));
-  QHBoxLayout folderRow;
-  folderRow.addWidget(&folderEdit);
-  folderRow.addWidget(&folderBrowse);
-
-  QComboBox authCombo;
-  authCombo.addItem(QStringLiteral("None"));
-  authCombo.addItem(QStringLiteral("Token"));
-  authCombo.addItem(QStringLiteral("SSH (use key)"));
-
-  QLineEdit githubToken;
-  githubToken.setEchoMode(QLineEdit::Password);
-  QLineEdit githubSshKey;
-  QPushButton keyBrowse(QStringLiteral("Browse"));
-  QHBoxLayout keyRow;
-  keyRow.addWidget(&githubSshKey);
-  keyRow.addWidget(&keyBrowse);
-
-  QLineEdit b2Token;
-  b2Token.setEchoMode(QLineEdit::Password);
-  QLineEdit b2Bucket;
-
-  nameEdit.setText(group.name);
-  folderEdit.setText(
-      m_db->getGroupSetting(groupId, QStringLiteral("folderPath")));
-  const QString savedAuth =
-      m_db->getGroupSetting(groupId, QStringLiteral("githubAuthMethod"));
-  if (savedAuth == QLatin1String("SSH (use key)"))
-    authCombo.setCurrentIndex(2);
-  else if (savedAuth == QLatin1String("Token"))
-    authCombo.setCurrentIndex(1);
-  githubToken.setText(
-      m_db->getGroupSetting(groupId, QStringLiteral("githubToken")));
-  githubSshKey.setText(
-      m_db->getGroupSetting(groupId, QStringLiteral("githubSshKey")));
-  b2Token.setText(
-      m_db->getGroupSetting(groupId, QStringLiteral("b2AuthToken")));
-  b2Bucket.setText(group.b2BucketName);
-
-  form->addRow(QStringLiteral("Group name:"), &nameEdit);
-  form->addRow(QStringLiteral("Folder to track:"), &folderRow);
-  form->addRow(QStringLiteral("GitHub auth:"), &authCombo);
-  form->addRow(QStringLiteral("GitHub token:"), &githubToken);
-  form->addRow(QStringLiteral("GitHub SSH key:"), &keyRow);
-  form->addRow(QStringLiteral("B2 auth token:"), &b2Token);
-  form->addRow(QStringLiteral("B2 bucket:"), &b2Bucket);
-
-  auto *buttons = new QDialogButtonBox(
-      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-  form->addRow(buttons);
-  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-  connect(&folderBrowse, &QPushButton::clicked, this, [&]() {
-    const QString dir = QFileDialog::getExistingDirectory(
-        this, QStringLiteral("Select Folder"));
-    if (!dir.isEmpty())
-      folderEdit.setText(dir);
+  m_api->renameGroup(groupId, name.trimmed(), [this](const ApiGroup &) {
+    reloadGroups([this]() { refreshDetailPane(); });
   });
-  connect(&keyBrowse, &QPushButton::clicked, this, [&]() {
-    const QString fn =
-        QFileDialog::getOpenFileName(this, QStringLiteral("Select SSH Key"));
-    if (!fn.isEmpty())
-      githubSshKey.setText(fn);
-  });
-
-  if (dlg.exec() != QDialog::Accepted)
-    return;
-
-  const QString newName = nameEdit.text().trimmed();
-  if (newName.isEmpty())
-    return;
-
-  if (!m_db->renameGroup(groupId, newName))
-    QMessageBox::warning(this, QStringLiteral("Rename Failed"),
-                         QStringLiteral("Could not rename group."));
-
-  const QString newFolder = folderEdit.text().trimmed();
-  m_db->saveGroupSetting(groupId, QStringLiteral("folderPath"), newFolder);
-  m_db->saveGroupSetting(groupId, QStringLiteral("githubAuthMethod"),
-                         authCombo.currentText());
-  m_db->saveGroupSetting(groupId, QStringLiteral("githubToken"),
-                         githubToken.text().trimmed());
-  m_db->saveGroupSetting(groupId, QStringLiteral("githubSshKey"),
-                         githubSshKey.text().trimmed());
-  m_db->saveGroupSetting(groupId, QStringLiteral("b2AuthToken"),
-                         b2Token.text().trimmed());
-
-  // If folder changed, reset members and add files under that folder
-  if (!newFolder.isEmpty()) {
-    m_db->clearGroupMembers(groupId);
-    for (const PdfFile &f : m_pdfModel->allFiles()) {
-      if (f.folderPath.startsWith(newFolder))
-        m_db->setFileInGroup(f.id, groupId, true);
-    }
-  }
-
-  refreshDetailPane();
 }
 
-void MainWindow::onRemoveGroup() {
+void MainWindow::onDeleteGroup() {
   const int groupId = selectedGroupId();
-  if (groupId < 0)
+  const ApiGroup group = groupById(groupId);
+  if (!group.isValid())
     return;
-  const FileGroup group = m_db->groupById(groupId);
+
   const auto reply = QMessageBox::question(
-      this, QStringLiteral("Remove Group"),
-      QStringLiteral("Delete group '%1' and remove its associations?")
+      this, QStringLiteral("Delete Group"),
+      QStringLiteral("Delete '%1'?\n\nIts tags and notes are removed for "
+                     "every member. The PDFs on your disk are untouched.")
           .arg(group.name),
       QMessageBox::Yes | QMessageBox::Cancel);
   if (reply != QMessageBox::Yes)
     return;
-  m_db->deleteGroup(groupId);
-  refreshDetailPane();
+
+  m_api->deleteGroup(groupId, [this, groupId]() {
+    if (m_activeGroupId == groupId)
+      m_activeGroupId = -1;
+    reloadGroups([this]() {
+      reloadTagVocabulary();
+      refreshDetailPane();
+    });
+  });
+}
+
+void MainWindow::onManageMembers() {
+  const int groupId = selectedGroupId();
+  const ApiGroup group = groupById(groupId);
+  if (!group.isValid())
+    return;
+
+  QDialog dlg(this);
+  dlg.setWindowTitle(QStringLiteral("Members — %1").arg(group.name));
+  dlg.setMinimumWidth(420);
+
+  auto *layout = new QVBoxLayout(&dlg);
+  auto *memberList = new QListWidget(&dlg);
+  layout->addWidget(memberList);
+
+  auto *addRow = new QHBoxLayout;
+  auto *emailEdit = new QLineEdit(&dlg);
+  emailEdit->setPlaceholderText(QStringLiteral("teammate@example.com"));
+  auto *addBtn = new QPushButton(QStringLiteral("Invite"), &dlg);
+  auto *removeBtn = new QPushButton(QStringLiteral("Remove"), &dlg);
+  addRow->addWidget(emailEdit);
+  addRow->addWidget(addBtn);
+  addRow->addWidget(removeBtn);
+  layout->addLayout(addRow);
+
+  auto *hint = new QLabel(&dlg);
+  hint->setWordWrap(true);
+  hint->setStyleSheet(QStringLiteral("color: #8a8d95; font-size: 8pt;"));
+  hint->setText(
+      group.isOwner()
+          ? QStringLiteral("Members can add files, tags and notes. Only you "
+                           "can invite or remove people. Notes can only ever "
+                           "be edited by whoever wrote them.")
+          : QStringLiteral("Only the group owner can invite or remove "
+                           "members. You can remove yourself."));
+  layout->addWidget(hint);
+
+  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  layout->addWidget(buttons);
+
+  const int myId = m_api->currentUser().id;
+
+  auto reload = [this, groupId, memberList]() {
+    m_api->listMembers(groupId, [memberList](const QList<ApiMember> &members) {
+      memberList->clear();
+      for (const ApiMember &member : members) {
+        auto *item = new QListWidgetItem(
+            QStringLiteral("%1  <%2>%3")
+                .arg(member.displayName, member.email,
+                     member.isOwner() ? QStringLiteral("  — owner")
+                                      : QString{}),
+            memberList);
+        item->setData(Qt::UserRole, member.userId);
+        item->setData(Qt::UserRole + 1, member.isOwner());
+      }
+    });
+  };
+
+  // The owner may invite anyone; a member may only remove themselves.
+  addBtn->setEnabled(group.isOwner() && !group.isPersonal);
+  emailEdit->setEnabled(group.isOwner() && !group.isPersonal);
+
+  connect(addBtn, &QPushButton::clicked, &dlg, [&]() {
+    const QString email = emailEdit->text().trimmed();
+    if (email.isEmpty())
+      return;
+    m_api->addMember(groupId, email, [&, reload](const ApiMember &) {
+      emailEdit->clear();
+      reload();
+      reloadGroups();
+    });
+  });
+
+  connect(removeBtn, &QPushButton::clicked, &dlg, [&]() {
+    QListWidgetItem *item = memberList->currentItem();
+    if (!item)
+      return;
+    const int userId = item->data(Qt::UserRole).toInt();
+
+    const QString question =
+        userId == myId
+            ? QStringLiteral("Leave '%1'? You'll lose access to its files, "
+                             "tags and notes.")
+                  .arg(group.name)
+            : QStringLiteral("Remove %1 from '%2'?")
+                  .arg(item->text(), group.name);
+    if (QMessageBox::question(&dlg, QStringLiteral("Remove Member"), question,
+                              QMessageBox::Yes | QMessageBox::Cancel) !=
+        QMessageBox::Yes)
+      return;
+
+    m_api->removeMember(groupId, userId, [&, reload, userId]() {
+      if (userId == myId) {
+        dlg.accept();
+        reloadGroups([this]() { refreshDetailPane(); });
+        return;
+      }
+      reload();
+      reloadGroups();
+    });
+  });
+
+  reload();
+  dlg.exec();
 }
 
 void MainWindow::onGroupItemChanged(QListWidgetItem *item) {
-  const PdfFile f = m_pdfModel->fileByPath(m_selectedFilePath);
-  if (!f.isValid() || !item)
+  const PdfFile file = m_pdfModel->fileByPath(m_selectedFilePath);
+  if (!file.isValid() || !item)
     return;
-  m_db->setFileInGroup(f.id, item->data(Qt::UserRole).toInt(),
-                       item->checkState() == Qt::Checked);
+
+  const int groupId = item->data(Qt::UserRole).toInt();
+  const bool wanted = item->checkState() == Qt::Checked;
+  const QString filePath = m_selectedFilePath;
+
+  if (wanted) {
+    m_selectedFileGroups.insert(groupId);
+    resolveRemoteFile(groupId, filePath, [this, groupId](int) {
+      if (groupId == activeGroupId())
+        refreshNotes();
+      reloadGroups();
+    });
+    return;
+  }
+
+  const QString hash = contentHashFor(filePath);
+  const int remoteFileId =
+      hash.isEmpty() ? -1 : m_db->remoteFileId(groupId, hash);
+  if (remoteFileId < 0) {
+    m_selectedFileGroups.remove(groupId);
+    return;
+  }
+
+  const ApiGroup group = groupById(groupId);
+  const auto reply = QMessageBox::question(
+      this, QStringLiteral("Remove From Group"),
+      QStringLiteral("Remove '%1' from '%2'?\n\nIts tags and notes in that "
+                     "group are deleted for everyone. The file on your disk "
+                     "is untouched.")
+          .arg(file.fileName, group.name),
+      QMessageBox::Yes | QMessageBox::Cancel);
+  if (reply != QMessageBox::Yes) {
+    refreshGroupList();  // put the tick back
+    return;
+  }
+
+  m_api->removeFile(groupId, remoteFileId, [this, groupId, hash]() {
+    m_selectedFileGroups.remove(groupId);
+    m_db->forgetRemoteFile(groupId, hash);
+    if (groupId == activeGroupId())
+      refreshNotes();
+    reloadGroups();
+  });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Sync
+// ─────────────────────────────────────────────────────────────────────────────
 
 void MainWindow::onSyncGroup() {
   const int groupId = selectedGroupId();
-  if (groupId < 0)
+  const ApiGroup group = groupById(groupId);
+  if (!group.isValid())
     return;
 
-  const FileGroup group = m_db->groupById(groupId);
-  QList<PdfFile> files;
-  for (const PdfFile &f : m_pdfModel->allFiles()) {
-    if (m_db->fileGroupIds(f.id).contains(groupId))
-      files.append(f);
-  }
-  if (files.isEmpty()) {
-    QMessageBox::information(this, QStringLiteral("Nothing To Sync"),
-                             QStringLiteral("This group has no files."));
-    return;
-  }
+  m_api->syncStatus(groupId, [this, groupId,
+                              group](const ApiSyncStatus &status) {
+    if (status.pending.isEmpty()) {
+      QMessageBox::information(
+          this, QStringLiteral("Nothing To Sync"),
+          QStringLiteral("All %1 file(s) in '%2' are already stored.")
+              .arg(status.totalFiles)
+              .arg(group.name));
+      return;
+    }
 
-  QDialog dlg(this);
-  dlg.setWindowTitle(QStringLiteral("Sync Group"));
-  auto *form = new QFormLayout(&dlg);
-  QLineEdit repoUrl;
-  QLineEdit githubToken;
-  QCheckBox useSsh(QStringLiteral("Push via SSH (use key)"));
-  QLineEdit sshKeyPath;
-  QPushButton sshBrowse(QStringLiteral("Browse"));
-  QHBoxLayout sshRow;
-  sshRow.addWidget(&sshKeyPath);
-  sshRow.addWidget(&sshBrowse);
-  QLineEdit b2ApiUrl;
-  QLineEdit b2BucketId;
-  QLineEdit b2AuthToken;
-  QLineEdit b2Prefix;
-  repoUrl.setText(group.githubRepoUrl);
-  b2ApiUrl.setText(QStringLiteral("https://api.backblazeb2.com"));
-  b2BucketId.setText(group.b2BucketName);
-  b2Prefix.setText(
-      QStringLiteral("pdforganizer/%1").arg(groupSlug(group.name)));
-  githubToken.setEchoMode(QLineEdit::Password);
-  b2AuthToken.setEchoMode(QLineEdit::Password);
+    auto *progress = new QProgressDialog(
+        QStringLiteral("Uploading files in '%1'…").arg(group.name),
+        QStringLiteral("Cancel"), 0, status.pending.size(), this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+    progress->setValue(0);
 
-  // Prefill saved credentials if available
-  const QString savedAuthMethod =
-      m_db->getGroupSetting(groupId, QStringLiteral("githubAuthMethod"));
-  const QString savedGithubToken =
-      m_db->getGroupSetting(groupId, QStringLiteral("githubToken"));
-  const QString savedSshKey =
-      m_db->getGroupSetting(groupId, QStringLiteral("githubSshKey"));
-  const QString savedB2Token =
-      m_db->getGroupSetting(groupId, QStringLiteral("b2AuthToken"));
-  if (!savedGithubToken.isEmpty())
-    githubToken.setText(savedGithubToken);
-  if (!savedSshKey.isEmpty())
-    sshKeyPath.setText(savedSshKey);
-  if (!savedB2Token.isEmpty())
-    b2AuthToken.setText(savedB2Token);
-  if (savedAuthMethod == QLatin1String("SSH (use key)"))
-    useSsh.setChecked(true);
-
-  form->addRow(QStringLiteral("GitHub repo URL:"), &repoUrl);
-  form->addRow(QStringLiteral("GitHub token:"), &githubToken);
-  form->addRow(QStringLiteral(""), &useSsh);
-  form->addRow(QStringLiteral("SSH key:"), &sshRow);
-  form->addRow(QStringLiteral("B2 API URL:"), &b2ApiUrl);
-  form->addRow(QStringLiteral("B2 bucket ID:"), &b2BucketId);
-  form->addRow(QStringLiteral("B2 auth token:"), &b2AuthToken);
-  form->addRow(QStringLiteral("B2 prefix:"), &b2Prefix);
-  auto *buttons = new QDialogButtonBox(
-      QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-  form->addRow(buttons);
-  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-  connect(&sshBrowse, &QPushButton::clicked, this, [&]() {
-    const QString fn =
-        QFileDialog::getOpenFileName(this, QStringLiteral("Select SSH Key"));
-    if (!fn.isEmpty())
-      sshKeyPath.setText(fn);
+    uploadNext(groupId, status.pending, 0, 0, progress);
   });
-  if (dlg.exec() != QDialog::Accepted)
-    return;
+}
 
-  QString owner;
-  QString repo;
-  if (!githubRepoParts(repoUrl.text(), &owner, &repo)) {
-    QMessageBox::warning(this, QStringLiteral("Invalid Repo"),
-                         QStringLiteral("Use https://github.com/owner/repo."));
-    return;
-  }
-  const bool haveGithubToken = !githubToken.text().trimmed().isEmpty();
-  if (!haveGithubToken && !useSsh.isChecked()) {
-    QMessageBox::warning(
-        this, QStringLiteral("Missing Sync Credentials"),
-        QStringLiteral("Provide a GitHub token or enable SSH push."));
-    return;
-  }
-  if (b2AuthToken.text().trimmed().isEmpty() ||
-      b2BucketId.text().trimmed().isEmpty() ||
-      b2ApiUrl.text().trimmed().isEmpty()) {
-    QMessageBox::warning(
-        this, QStringLiteral("Missing Sync Credentials"),
-        QStringLiteral(
-            "B2 API URL, bucket ID, and B2 auth token are required."));
+void MainWindow::uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
+                            int skipped, QProgressDialog *progress) {
+  const int done = uploaded + skipped;
+
+  if (pending.isEmpty() || progress->wasCanceled()) {
+    const bool canceled = progress->wasCanceled() && !pending.isEmpty();
+    progress->close();
+    progress->deleteLater();
+
+    QMessageBox::information(
+        this,
+        canceled ? QStringLiteral("Sync Stopped")
+                 : QStringLiteral("Sync Complete"),
+        QStringLiteral("Uploaded %1 file(s), skipped %2.%3")
+            .arg(uploaded)
+            .arg(skipped)
+            .arg(canceled ? QStringLiteral("\n\n%1 file(s) were not uploaded.")
+                                .arg(pending.size())
+                          : QString{}));
+    refreshDetailPane();
     return;
   }
 
-  QJsonObject metadata;
-  metadata[QStringLiteral("group")] = group.name;
-  metadata[QStringLiteral("syncedAt")] =
-      QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
-  QJsonArray filesJson;
-  QJsonArray tagsJson;
-  for (const QString &tag : m_tagModel->allTags())
-    tagsJson.append(tag);
-  for (const PdfFile &f : files) {
-    QJsonObject obj;
-    obj[QStringLiteral("path")] = f.filePath;
-    obj[QStringLiteral("fileName")] = f.fileName;
-    obj[QStringLiteral("fileSize")] = QString::number(f.fileSizeBytes);
-    obj[QStringLiteral("lastModified")] = f.lastModified.toString(Qt::ISODate);
-    QJsonArray fileTags;
-    for (const QString &tag : f.tags)
-      fileTags.append(tag);
-    obj[QStringLiteral("tags")] = fileTags;
-    QJsonArray notes;
-    for (const FileNote &note : m_db->loadNotes(f.id)) {
-      QJsonObject n;
-      n[QStringLiteral("author")] = note.author;
-      n[QStringLiteral("body")] = note.body;
-      n[QStringLiteral("createdAt")] = note.createdAt.toString(Qt::ISODate);
-      notes.append(n);
+  const ApiFile file = pending.takeFirst();
+  progress->setValue(done);
+  progress->setLabelText(QStringLiteral("Uploading %1…").arg(file.fileName));
+
+  // The backend knows the file by content hash; we have to find the copy on
+  // this machine to send.
+  QString localPath;
+  for (const PdfFile &candidate : m_pdfModel->allFiles()) {
+    if (contentHashFor(candidate.filePath) == file.contentHash) {
+      localPath = candidate.filePath;
+      break;
     }
-    obj[QStringLiteral("notes")] = notes;
-    filesJson.append(obj);
-  }
-  metadata[QStringLiteral("tags")] = tagsJson;
-  metadata[QStringLiteral("files")] = filesJson;
-
-  const QString metaPath =
-      QStringLiteral("pdforganizer/groups/%1.json").arg(groupSlug(group.name));
-
-  QNetworkAccessManager nam;
-
-  // Persist credentials the user supplied for future syncs
-  m_db->saveGroupSetting(groupId, QStringLiteral("githubAuthMethod"),
-                         useSsh.isChecked() ? QStringLiteral("SSH (use key)")
-                                            : QStringLiteral("Token"));
-  if (!githubToken.text().trimmed().isEmpty())
-    m_db->saveGroupSetting(groupId, QStringLiteral("githubToken"),
-                           githubToken.text().trimmed());
-  if (!sshKeyPath.text().trimmed().isEmpty())
-    m_db->saveGroupSetting(groupId, QStringLiteral("githubSshKey"),
-                           sshKeyPath.text().trimmed());
-  if (!b2AuthToken.text().trimmed().isEmpty())
-    m_db->saveGroupSetting(groupId, QStringLiteral("b2AuthToken"),
-                           b2AuthToken.text().trimmed());
-
-  if (useSsh.isChecked()) {
-    // Attempt to push metadata via git+ssh using the provided key
-    const QString repoSsh =
-        QStringLiteral("git@github.com:%1/%2.git").arg(owner, repo);
-    if (sshKeyPath.text().trimmed().isEmpty()) {
-      QMessageBox::warning(
-          this, QStringLiteral("SSH Key Required"),
-          QStringLiteral("Provide an SSH key to push via SSH."));
-      return;
-    }
-
-    QTemporaryDir tmpDir;
-    if (!tmpDir.isValid()) {
-      QMessageBox::warning(
-          this, QStringLiteral("Sync Failed"),
-          QStringLiteral("Could not create temporary directory."));
-      return;
-    }
-    const QString root = tmpDir.path();
-    QDir repoDir(root);
-
-    QProcess git;
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    // const QString sshCmd =
-    //     QStringLiteral(
-    //         "ssh -i %1 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no")
-    //         .arg(sshKeyPath.text().trimmed());
-    // env.insert("GIT_SSH_COMMAND", sshCmd);
-    // git.setProcessEnvironment(env);
-
-    auto runGit = [&](const QStringList &args) -> bool {
-      git.setWorkingDirectory(root);
-      git.start(QStringLiteral("git"), args);
-      if (!git.waitForFinished(30000))
-        return false;
-      return git.exitCode() == 0;
-    };
-
-    if (!runGit({QStringLiteral("init")})) {
-      QMessageBox::warning(
-          this, QStringLiteral("Git Init Failed"),
-          QStringLiteral("Could not initialize temporary git repository."));
-      return;
-    }
-
-    // write metadata file
-    const QString fullPath = repoDir.filePath(metaPath);
-    repoDir.mkpath(QFileInfo(fullPath).path());
-    QFile out(fullPath);
-    if (!out.open(QIODevice::WriteOnly)) {
-      QMessageBox::warning(this, QStringLiteral("Write Failed"),
-                           QStringLiteral("Could not write metadata file."));
-      return;
-    }
-    out.write(QJsonDocument(metadata).toJson(QJsonDocument::Indented));
-    out.close();
-
-    if (!runGit({QStringLiteral("add"), QStringLiteral(".")}) ||
-        !runGit({QStringLiteral("commit"), QStringLiteral("-m"),
-                 QStringLiteral("Sync PDF Organizer metadata")})) {
-      QMessageBox::warning(this, QStringLiteral("Git Commit Failed"),
-                           QStringLiteral("Could not commit metadata."));
-      return;
-    }
-
-    if (!runGit({QStringLiteral("remote"), QStringLiteral("add"),
-                 QStringLiteral("origin"), repoSsh})) {
-      QMessageBox::warning(this, QStringLiteral("Git Remote Failed"),
-                           QStringLiteral("Could not add remote."));
-      return;
-    }
-
-    // Push to origin (attempt to push to main branch)
-    if (!runGit({QStringLiteral("push"), QStringLiteral("origin"),
-                 QStringLiteral("HEAD:refs/heads/main")})) {
-      QMessageBox::warning(this, QStringLiteral("Git Push Failed"),
-                           QStringLiteral("Could not push metadata via SSH."));
-      return;
-    }
-
-    m_db->saveGroupGithubValidation(groupId, repoUrl.text(),
-                                    QStringLiteral("synced"));
-  } else {
-    const QString contentsUrl =
-        QStringLiteral("https://api.github.com/repos/%1/%2/contents/%3")
-            .arg(owner, repo, metaPath);
-
-    QNetworkRequest getReq{QUrl(contentsUrl)};
-    getReq.setRawHeader("Accept", "application/vnd.github+json");
-    getReq.setRawHeader("Authorization",
-                        "Bearer " + githubToken.text().trimmed().toUtf8());
-    getReq.setRawHeader("User-Agent", "PDFOrganizer");
-    QNetworkReply *getReply = blockingGet(nam, getReq);
-    const QByteArray getBody = getReply->readAll();
-    const bool hasExistingMeta = getReply->error() == QNetworkReply::NoError;
-    const int getStatus =
-        getReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    getReply->deleteLater();
-    if (!hasExistingMeta && getStatus != 404) {
-      QMessageBox::warning(
-          this, QStringLiteral("GitHub Sync Failed"),
-          QStringLiteral("Could not read existing metadata from GitHub."));
-      return;
-    }
-
-    QJsonObject putBody;
-    putBody[QStringLiteral("message")] =
-        QStringLiteral("Sync PDF Organizer metadata for %1").arg(group.name);
-    putBody[QStringLiteral("content")] = QString::fromLatin1(
-        QJsonDocument(metadata).toJson(QJsonDocument::Indented).toBase64());
-    if (hasExistingMeta)
-      putBody[QStringLiteral("sha")] = QJsonDocument::fromJson(getBody)
-                                           .object()
-                                           .value(QStringLiteral("sha"))
-                                           .toString();
-
-    QNetworkRequest putReq{QUrl(contentsUrl)};
-    putReq.setHeader(QNetworkRequest::ContentTypeHeader,
-                     QStringLiteral("application/json"));
-    putReq.setRawHeader("Accept", "application/vnd.github+json");
-    putReq.setRawHeader("Authorization",
-                        "Bearer " + githubToken.text().trimmed().toUtf8());
-    putReq.setRawHeader("User-Agent", "PDFOrganizer");
-    QNetworkReply *putReply = blockingPut(
-        nam, putReq, QJsonDocument(putBody).toJson(QJsonDocument::Compact));
-    const bool githubOk = putReply->error() == QNetworkReply::NoError;
-    putReply->deleteLater();
-    if (!githubOk) {
-      QMessageBox::warning(
-          this, QStringLiteral("GitHub Sync Failed"),
-          QStringLiteral(
-              "Could not write metadata. Check token contents-write access."));
-      return;
-    }
-    m_db->saveGroupGithubValidation(groupId, repoUrl.text(),
-                                    QStringLiteral("synced"));
   }
 
-  QUrl uploadUrl(b2ApiUrl.text().trimmed() +
-                 QStringLiteral("/b2api/v4/b2_get_upload_url"));
-  QUrlQuery uploadQuery;
-  uploadQuery.addQueryItem(QStringLiteral("bucketId"),
-                           b2BucketId.text().trimmed());
-  uploadUrl.setQuery(uploadQuery);
-  QNetworkRequest uploadUrlReq(uploadUrl);
-  uploadUrlReq.setRawHeader("Authorization",
-                            b2AuthToken.text().trimmed().toUtf8());
-  QNetworkReply *uploadUrlReply = blockingGet(nam, uploadUrlReq);
-  const QByteArray uploadUrlBody = uploadUrlReply->readAll();
-  const bool uploadUrlOk = uploadUrlReply->error() == QNetworkReply::NoError;
-  uploadUrlReply->deleteLater();
-  if (!uploadUrlOk) {
-    QMessageBox::warning(
-        this, QStringLiteral("B2 Sync Failed"),
-        QStringLiteral(
-            "Could not get a B2 upload URL from the provided auth token."));
+  if (localPath.isEmpty()) {
+    // Another member registered it; we simply do not hold a copy to upload.
+    uploadNext(groupId, pending, uploaded, skipped + 1, progress);
     return;
   }
 
-  const QJsonObject uploadInfo =
-      QJsonDocument::fromJson(uploadUrlBody).object();
-  const QUrl fileUploadUrl(
-      uploadInfo.value(QStringLiteral("uploadUrl")).toString());
-  const QByteArray fileUploadToken =
-      uploadInfo.value(QStringLiteral("authorizationToken"))
-          .toString()
-          .toUtf8();
-  int uploaded = 0;
-  int skipped = 0;
-  for (const PdfFile &f : files) {
-    if (m_db->wasFileUploaded(groupId, f.id, f.fileSizeBytes, f.lastModified)) {
-      ++skipped;
-      continue;
-    }
-
-    QFile file(f.filePath);
-    if (!file.open(QIODevice::ReadOnly))
-      continue;
-    const QByteArray content =
-        file.readAll(); // ponytail: stream when large PDFs become a problem.
-    const QByteArray sha1 =
-        QCryptographicHash::hash(content, QCryptographicHash::Sha1).toHex();
-    const QString objectName =
-        QStringLiteral("%1/%2-%3")
-            .arg(b2Prefix.text().trimmed(), QString::number(f.id), f.fileName);
-
-    QNetworkRequest uploadReq(fileUploadUrl);
-    uploadReq.setHeader(QNetworkRequest::ContentTypeHeader,
-                        QStringLiteral("b2/x-auto"));
-    uploadReq.setHeader(QNetworkRequest::ContentLengthHeader, content.size());
-    uploadReq.setRawHeader("Authorization", fileUploadToken);
-    uploadReq.setRawHeader("X-Bz-File-Name",
-                           QUrl::toPercentEncoding(objectName, "/"));
-    uploadReq.setRawHeader("X-Bz-Content-Sha1", sha1);
-    QNetworkReply *uploadReply = blockingPost(nam, uploadReq, content);
-    const QByteArray body = uploadReply->readAll();
-    const bool ok = uploadReply->error() == QNetworkReply::NoError;
-    uploadReply->deleteLater();
-    if (!ok) {
-      QMessageBox::warning(
-          this, QStringLiteral("B2 Sync Failed"),
-          QStringLiteral("Upload failed for %1.").arg(f.fileName));
-      return;
-    }
-    const QString b2FileId = QJsonDocument::fromJson(body)
-                                 .object()
-                                 .value(QStringLiteral("fileId"))
-                                 .toString();
-    m_db->markFileUploaded(groupId, f.id, f.fileSizeBytes, f.lastModified,
-                           b2FileId);
-    ++uploaded;
-  }
-
-  m_db->saveGroupB2Validation(groupId, QString{}, b2BucketId.text(), QString{},
-                              QStringLiteral("synced"));
-  refreshDetailPane();
-  QMessageBox::information(
-      this, QStringLiteral("Sync Complete"),
-      QStringLiteral(
-          "Metadata pushed. Uploaded %1 file(s), skipped %2 unchanged file(s).")
-          .arg(uploaded)
-          .arg(skipped));
+  m_api->uploadFile(
+      groupId, file.id, localPath,
+      [this, groupId, pending, uploaded, skipped,
+       progress](const ApiUploadResult &result) {
+        uploadNext(groupId, pending, uploaded + (result.uploaded ? 1 : 0),
+                   skipped + (result.uploaded ? 0 : 1), progress);
+      },
+      [this, progress](const ApiError &error) {
+        progress->close();
+        progress->deleteLater();
+        showError(error);
+        refreshDetailPane();
+      });
 }
 
 void MainWindow::onSearchTextChanged(const QString &text) {
@@ -1208,7 +1346,19 @@ void MainWindow::onSearchTextChanged(const QString &text) {
 }
 
 void MainWindow::openTagManager() {
-  TagManagerDialog dlg(m_tagModel, m_tagCtrl, this);
+  const int groupId = activeGroupId();
+  if (groupId < 0) {
+    QMessageBox::information(
+        this, QStringLiteral("Sign In Required"),
+        QStringLiteral("Sign in and pick a group to manage its tags."));
+    return;
+  }
+
+  TagManagerDialog dlg(m_api, groupId, activeGroup().name, this);
+  connect(&dlg, &TagManagerDialog::tagsChanged, this, [this]() {
+    reloadTagVocabulary();
+    m_folderPanel->refresh();
+  });
   dlg.exec();
   m_folderPanel->refresh();
 }
@@ -1217,6 +1367,14 @@ void MainWindow::openSettings() {
   SettingsDialog dlg(m_db, this);
   connect(&dlg, &SettingsDialog::darkModeChanged, this,
           &MainWindow::applyDarkTheme);
+  connect(&dlg, &SettingsDialog::serverChanged, this,
+          [this](const QString &serverUrl) {
+            // A different server means different accounts and ids entirely.
+            m_api->clearSession();
+            m_api->setBaseUrl(QUrl(serverUrl));
+            onSignOut();
+            promptSignIn();
+          });
   dlg.exec();
 }
 
@@ -1258,16 +1416,20 @@ QWidget *MainWindow::buildDetailPane() {
   root->addWidget(new QLabel(QStringLiteral("GROUPS"), pane));
   m_groupList = new QListWidget(pane);
   m_groupList->setMinimumHeight(120);
+  m_groupList->setToolTip(
+      QStringLiteral("Tick a group to share this file with its members"));
   root->addWidget(m_groupList);
 
   auto *groupRow = new QHBoxLayout;
-  auto *addGroupBtn = new QPushButton(QStringLiteral("Add Group"), pane);
-  m_editGroupBtn = new QPushButton(QStringLiteral("Edit Group"), pane);
-  m_removeGroupBtn = new QPushButton(QStringLiteral("Remove Group"), pane);
-  m_syncBtn = new QPushButton(QStringLiteral("Sync Group"), pane);
-  groupRow->addWidget(addGroupBtn);
-  groupRow->addWidget(m_editGroupBtn);
+  m_addGroupBtn = new QPushButton(QStringLiteral("New"), pane);
+  m_renameGroupBtn = new QPushButton(QStringLiteral("Rename"), pane);
+  m_removeGroupBtn = new QPushButton(QStringLiteral("Delete"), pane);
+  m_membersBtn = new QPushButton(QStringLiteral("Members"), pane);
+  m_syncBtn = new QPushButton(QStringLiteral("Sync"), pane);
+  groupRow->addWidget(m_addGroupBtn);
+  groupRow->addWidget(m_renameGroupBtn);
   groupRow->addWidget(m_removeGroupBtn);
+  groupRow->addWidget(m_membersBtn);
   groupRow->addWidget(m_syncBtn);
   root->addLayout(groupRow);
 
@@ -1288,109 +1450,134 @@ QWidget *MainWindow::buildDetailPane() {
   noteScroll->setWidget(noteBody);
   root->addWidget(noteScroll, 1);
 
-  connect(addGroupBtn, &QPushButton::clicked, this, &MainWindow::onCreateGroup);
-  connect(m_editGroupBtn, &QPushButton::clicked, this,
-          &MainWindow::onEditGroup);
+  connect(m_addGroupBtn, &QPushButton::clicked, this,
+          &MainWindow::onCreateGroup);
+  connect(m_renameGroupBtn, &QPushButton::clicked, this,
+          &MainWindow::onRenameGroup);
   connect(m_removeGroupBtn, &QPushButton::clicked, this,
-          &MainWindow::onRemoveGroup);
+          &MainWindow::onDeleteGroup);
+  connect(m_membersBtn, &QPushButton::clicked, this,
+          &MainWindow::onManageMembers);
   connect(m_syncBtn, &QPushButton::clicked, this, &MainWindow::onSyncGroup);
   connect(m_addNoteBtn, &QPushButton::clicked, this, &MainWindow::onAddNote);
   connect(m_groupList, &QListWidget::itemChanged, this,
           &MainWindow::onGroupItemChanged);
   connect(m_groupList, &QListWidget::currentItemChanged, this,
-          [this](QListWidgetItem *current) {
-            const bool enabled = current && !m_selectedFilePath.isEmpty();
-            m_editGroupBtn->setEnabled(enabled);
-            m_removeGroupBtn->setEnabled(enabled);
-            m_syncBtn->setEnabled(enabled);
-          });
+          [this](QListWidgetItem *) { refreshDetailPane(); });
 
   return pane;
 }
 
 void MainWindow::refreshDetailPane() {
-  const PdfFile f = m_pdfModel->fileByPath(m_selectedFilePath);
-  const bool hasFile = f.isValid();
-  m_detailTitle->setText(hasFile ? f.fileName
+  if (!m_detailTitle)
+    return;
+
+  const PdfFile file = m_pdfModel->fileByPath(m_selectedFilePath);
+  const bool hasFile = file.isValid();
+  const bool online = m_api && m_api->isAuthenticated();
+
+  m_detailTitle->setText(hasFile ? file.fileName
                                  : QStringLiteral("No file selected"));
-  m_detailMeta->setText(hasFile
-                            ? QStringLiteral("%1\n%2").arg(
-                                  f.filePath, f.tags.join(QStringLiteral(", ")))
-                            : QString{});
-  m_groupList->setEnabled(hasFile);
-  m_noteEdit->setEnabled(hasFile);
-  m_addNoteBtn->setEnabled(hasFile);
-  m_editGroupBtn->setEnabled(hasFile && selectedGroupId() >= 0);
-  m_removeGroupBtn->setEnabled(hasFile && selectedGroupId() >= 0);
-  m_syncBtn->setEnabled(hasFile && selectedGroupId() >= 0);
 
-  {
-    const QSignalBlocker blocker(m_groupList);
-    m_groupList->clear();
-    const QList<int> fileGroups =
-        hasFile ? m_db->fileGroupIds(f.id) : QList<int>{};
-    for (const FileGroup &group : m_db->loadGroups()) {
-      auto *item = new QListWidgetItem(group.name, m_groupList);
-      item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-      item->setData(Qt::UserRole, group.id);
-      item->setToolTip(QStringLiteral("GitHub: %1\nB2: %2")
-                           .arg(group.githubStatus, group.b2Status));
-      item->setCheckState(fileGroups.contains(group.id) ? Qt::Checked
-                                                        : Qt::Unchecked);
-    }
+  if (!online) {
+    m_detailMeta->setText(QStringLiteral(
+        "Sign in (File ▸ Sign In) to use groups, shared tags and notes."));
+  } else if (hasFile) {
+    m_detailMeta->setText(QStringLiteral("%1\n%2").arg(
+        file.filePath, file.tags.join(QStringLiteral(", "))));
+  } else {
+    m_detailMeta->clear();
   }
 
-  while (QLayoutItem *item = m_notesLayout->takeAt(0)) {
-    delete item->widget();
-    delete item;
-  }
+  refreshGroupList();
 
+  // A group must be selected in the list for the group-level buttons to have
+  // a target; ownership decides which of them are permitted.
+  const ApiGroup selected = groupById(selectedGroupId());
+  const bool hasSelection = selected.isValid();
+  const bool ownsSelection = hasSelection && selected.isOwner();
+
+  m_groupList->setEnabled(online);
+  m_addGroupBtn->setEnabled(online);
+  m_renameGroupBtn->setEnabled(ownsSelection && !selected.isPersonal);
+  m_removeGroupBtn->setEnabled(ownsSelection && !selected.isPersonal);
+  m_membersBtn->setEnabled(hasSelection && !selected.isPersonal);
+  m_syncBtn->setEnabled(hasSelection);
+
+  m_renameGroupBtn->setToolTip(
+      hasSelection && !ownsSelection
+          ? QStringLiteral("Only the group's owner can rename it")
+          : QString{});
+  m_removeGroupBtn->setToolTip(
+      hasSelection && !ownsSelection
+          ? QStringLiteral("Only the group's owner can delete it")
+          : QString{});
+
+  const bool canWriteNotes = online && hasFile && activeGroupId() >= 0;
+  m_noteEdit->setEnabled(canWriteNotes);
+  m_addNoteBtn->setEnabled(canWriteNotes);
+  m_noteEdit->setPlaceholderText(
+      canWriteNotes
+          ? QStringLiteral("Add a note visible to '%1'…").arg(activeGroup().name)
+          : QStringLiteral("Add a note…"));
+
+  refreshNotes();
+}
+
+void MainWindow::refreshGroupList() {
+  if (!m_groupList)
+    return;
+
+  const int previous = selectedGroupId();
+  const PdfFile file = m_pdfModel->fileByPath(m_selectedFilePath);
+  const bool hasFile = file.isValid();
+
+  // Which groups already hold this file, judged from the local id cache so
+  // the list draws without a round trip.
+  m_selectedFileGroups.clear();
   if (hasFile) {
-    for (const FileNote &note : m_db->loadNotes(f.id)) {
-      // Create a chat-like bubble for each note
-      auto *bubble = new QWidget;
-      bubble->setObjectName(QStringLiteral("noteBubble"));
-      bubble->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
-      auto *bl = new QVBoxLayout(bubble);
-      bl->setContentsMargins(10, 8, 10, 8);
-      bl->setSpacing(6);
-
-      auto *header =
-          new QLabel(QStringLiteral("%1 · %2").arg(
-                         note.author, note.createdAt.toLocalTime().toString(
-                                          QStringLiteral("yyyy-MM-dd hh:mm"))),
-                     bubble);
-      QFont hfont = header->font();
-      hfont.setBold(true);
-      header->setFont(hfont);
-      header->setStyleSheet(QStringLiteral("color: #9fb3ff; font-size: 9pt;"));
-
-      auto *body = new QLabel(note.body, bubble);
-      body->setWordWrap(true);
-      body->setTextInteractionFlags(Qt::TextSelectableByMouse);
-
-      bl->addWidget(header);
-      bl->addWidget(body);
-
-      // Light styling for bubble; works with both themes
-      bubble->setStyleSheet(QStringLiteral(
-          "QWidget#noteBubble { background: rgba(77,142,255,0.08); border: 1px "
-          "solid rgba(77,142,255,0.14); border-radius: 8px; }"));
-
-      m_notesLayout->addWidget(bubble);
+    const QString hash = contentHashFor(m_selectedFilePath);
+    if (!hash.isEmpty()) {
+      for (const ApiGroup &group : m_groups) {
+        if (m_db->remoteFileId(group.id, hash) >= 0)
+          m_selectedFileGroups.insert(group.id);
+      }
     }
   }
-  m_notesLayout->addStretch();
-}
 
-int MainWindow::selectedGroupId() const {
-  QListWidgetItem *item = m_groupList ? m_groupList->currentItem() : nullptr;
-  return item ? item->data(Qt::UserRole).toInt() : -1;
-}
+  const QSignalBlocker blocker(m_groupList);
+  m_groupList->clear();
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Dark theme
-// ─────────────────────────────────────────────────────────────────────────────
+  for (const ApiGroup &group : m_groups) {
+    auto *item = new QListWidgetItem(group.name, m_groupList);
+    item->setData(Qt::UserRole, group.id);
+
+    Qt::ItemFlags flags = item->flags();
+    if (hasFile)
+      flags |= Qt::ItemIsUserCheckable;
+    else
+      flags &= ~Qt::ItemIsUserCheckable;
+    item->setFlags(flags);
+
+    if (hasFile) {
+      item->setCheckState(m_selectedFileGroups.contains(group.id)
+                              ? Qt::Checked
+                              : Qt::Unchecked);
+    }
+
+    item->setToolTip(
+        QStringLiteral("%1\n%2 member(s), %3 file(s)\nYou are %4")
+            .arg(group.isPersonal ? QStringLiteral("Private to you")
+                                  : QStringLiteral("Shared group"))
+            .arg(group.memberCount)
+            .arg(group.fileCount)
+            .arg(group.isOwner() ? QStringLiteral("the owner")
+                                 : QStringLiteral("a member")));
+
+    if (group.id == previous)
+      m_groupList->setCurrentItem(item);
+  }
+}
 
 void MainWindow::applyDarkTheme(bool enabled) {
   if (!enabled) {
