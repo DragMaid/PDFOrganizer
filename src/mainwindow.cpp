@@ -67,6 +67,40 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+namespace {
+
+// A file name or a path has no spaces in it, so a word-wrapping QLabel sees one
+// unbreakable word — and a wrapped label's minimum width is the width of its
+// widest word. Left alone, one long name sets a floor that pushes the whole
+// right pane wider. Zero-width spaces give the layout somewhere to break
+// without changing a single visible character.
+QString breakableText(const QString &text) {
+  constexpr QChar kZeroWidthSpace(0x200B);
+  constexpr int kMaxRun = 12; // longest run left unbreakable, in characters
+
+  QString out;
+  out.reserve(text.size() * 2);
+
+  int run = 0;
+  for (const QChar ch : text) {
+    out.append(ch);
+    if (ch.isSpace()) {
+      run = 0;
+      continue;
+    }
+    ++run;
+    const bool separator = ch == u'/' || ch == u'\\' || ch == u'_' ||
+                           ch == u'-' || ch == u'.' || ch == u',';
+    if (separator || run >= kMaxRun) {
+      out.append(kZeroWidthSpace);
+      run = 0;
+    }
+  }
+  return out;
+}
+
+} // namespace
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  Construction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1646,16 +1680,23 @@ void MainWindow::refreshDetailPane() {
   const bool hasFile = file.isValid();
   const bool online = m_api && m_api->isAuthenticated();
 
-  m_detailTitle->setText(hasFile ? file.fileName
+  m_detailTitle->setText(hasFile ? breakableText(file.fileName)
                                  : QStringLiteral("No file selected"));
+  // The wrapped text carries invisible break points, so the untouched name
+  // stays reachable on hover.
+  m_detailTitle->setToolTip(hasFile ? file.fileName : QString{});
 
   if (!online) {
     m_detailMeta->setText(QStringLiteral(
         "Sign in (File ▸ Sign In) to use groups, shared tags and notes."));
+    m_detailMeta->setToolTip(QString{});
   } else if (hasFile) {
     m_detailMeta->setText(QStringLiteral("%1\n%2").arg(
-        file.filePath, file.tags.join(QStringLiteral(", "))));
+        breakableText(file.filePath),
+        breakableText(file.tags.join(QStringLiteral(", ")))));
+    m_detailMeta->setToolTip(file.filePath);
   } else {
+    m_detailMeta->setToolTip(QString{});
     m_detailMeta->clear();
   }
 
@@ -1710,6 +1751,9 @@ void MainWindow::refreshGroupHeader() {
 
   // The toolbar and the detail pane name the same thing, so they are filled in
   // together and can never disagree.
+  m_groupHeader->setToolTip(QString{});
+  m_groupMeta->setToolTip(QString{});
+
   if (!online) {
     m_groupHeader->setText(QStringLiteral("—"));
     m_groupMeta->setText(QStringLiteral(
@@ -1730,24 +1774,29 @@ void MainWindow::refreshGroupHeader() {
   if (!group.isValid()) {
     // The directory is watched but its group has not been created yet —
     // usually a scan still in flight, or a failed registration.
-    m_groupHeader->setText(groupNameForFolder(folder));
+    m_groupHeader->setText(breakableText(groupNameForFolder(folder)));
+    m_groupHeader->setToolTip(groupNameForFolder(folder));
     m_groupMeta->setText(
         QStringLiteral("Not shared yet — this directory's group is still being "
                        "set up."));
+    m_groupMeta->setToolTip(folder);
     m_groupLabel->setText(QStringLiteral("(pending)"));
     return;
   }
 
   m_groupHeader->setText(
       QStringLiteral("%1  ·  %2")
-          .arg(group.name, group.isOwner() ? QStringLiteral("you created it")
-                                           : QStringLiteral("you're a member")));
+          .arg(breakableText(group.name),
+               group.isOwner() ? QStringLiteral("you created it")
+                               : QStringLiteral("you're a member")));
+  m_groupHeader->setToolTip(group.name);
   // Subdirectories are groups of their own, so say what this count covers.
   m_groupMeta->setText(
       QStringLiteral("from %1\n%2 file(s) shared — subfolders are their own "
                      "groups")
-          .arg(folder)
+          .arg(breakableText(folder))
           .arg(group.fileCount));
+  m_groupMeta->setToolTip(folder);
   m_groupLabel->setText(group.name);
 }
 
