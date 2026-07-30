@@ -362,6 +362,11 @@ int main(int argc, char** argv)
             check(status.totalFiles == 1, "one file in the group");
             check(status.uploadedFiles == 0, "none uploaded yet");
             check(status.pending.size() == 1, "one pending upload");
+            // The download half of a sync is worked out client-side, so the
+            // whole list — with hashes — has to come back too.
+            check(status.files.size() == 1, "the full file list rides along");
+            check(status.files.first().contentHash == hash,
+                  "each entry carries the hash the client compares against");
             done();
         });
     });
@@ -605,6 +610,78 @@ int main(int argc, char** argv)
                           "the retired code is no longer recognised");
                     done();
                 });
+        });
+    });
+
+    // ── Removing a file ───────────────────────────────────────────────────────
+    // Detaching a file from a group and destroying the stored copy are separate
+    // acts, and the client has to be able to tell which one happened.
+    out << Qt::endl << "removal" << Qt::endl;
+
+    await("a member cannot delete the stored copy", [&](auto done) {
+        carol.removeFile(
+            sharedId, sharedFileId, /*deleteStoredCopy=*/true,
+            [&, done](const ApiFileRemoval&) {
+                check(false, "only the owner may destroy the stored copy");
+                done();
+            },
+            [&, done](const ApiError& e) {
+                check(e.httpStatus == 403, "a member's purge is a 403");
+                done();
+            });
+    });
+
+    await("the refused purge left the file in the group", [&](auto done) {
+        alice.listFiles(sharedId, [&, done](const QList<ApiFile>& files) {
+            bool present = false;
+            for (const ApiFile& file : files)
+                present = present || file.id == sharedFileId;
+            check(present, "nothing was removed by the refused call");
+            done();
+        });
+    });
+
+    await("a purge spares a blob another group still shares", [&](auto done) {
+        // The same content is registered in alice's first group, so destroying
+        // the blob here would pull it out from under that group too.
+        alice.removeFile(sharedId, sharedFileId, /*deleteStoredCopy=*/true,
+                         [&, done](const ApiFileRemoval& result) {
+                             check(result.detached, "the group lost the file");
+                             check(!result.purged,
+                                   "but the stored copy was kept");
+                             check(result.stillReferenced,
+                                   "and the client is told why");
+                             done();
+                         });
+    });
+
+    await("the other group's copy is untouched", [&](auto done) {
+        alice.listFiles(groupId, [&, done](const QList<ApiFile>& files) {
+            check(files.size() == 1, "the first group still lists the file");
+            check(files.first().uploaded == blobStored,
+                  "and its storage state did not change");
+            done();
+        });
+    });
+
+    await("the owner's purge takes the last copy with it", [&](auto done) {
+        alice.removeFile(groupId, fileId, /*deleteStoredCopy=*/true,
+                         [&, done](const ApiFileRemoval& result) {
+                             check(result.detached, "the group lost the file");
+                             check(!result.stillReferenced,
+                                   "no other group was holding it");
+                             // Only a file that reached storage can leave it;
+                             // without B2 configured there is nothing to purge.
+                             check(result.purged == blobStored,
+                                   "the stored copy went exactly when there was one");
+                             done();
+                         });
+    });
+
+    await("the purged file is gone from the group", [&](auto done) {
+        alice.listFiles(groupId, [&, done](const QList<ApiFile>& files) {
+            check(files.isEmpty(), "the group lists nothing now");
+            done();
         });
     });
 

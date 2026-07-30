@@ -85,7 +85,9 @@ bool DatabaseManager::createSchema()
                 file_size     INTEGER NOT NULL DEFAULT 0,
                 last_modified TEXT,
                 last_opened   TEXT,
-                page_count    INTEGER NOT NULL DEFAULT 0
+                page_count    INTEGER NOT NULL DEFAULT 0,
+                deleted_locally BOOLEAN NOT NULL DEFAULT 0,
+                pending_tags  BOOLEAN NOT NULL DEFAULT 0
             )
         )"),
 
@@ -95,6 +97,15 @@ bool DatabaseManager::createSchema()
                 pdf_id  INTEGER NOT NULL REFERENCES pdf_files(id) ON DELETE CASCADE,
                 tag_id  INTEGER NOT NULL REFERENCES tags(id)      ON DELETE CASCADE,
                 PRIMARY KEY (pdf_id, tag_id)
+            )
+        )"),
+
+        // Pending notes
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS pending_notes (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                pdf_id  INTEGER NOT NULL REFERENCES pdf_files(id) ON DELETE CASCADE,
+                body    TEXT    NOT NULL
             )
         )"),
 
@@ -164,6 +175,24 @@ bool DatabaseManager::createSchema()
         if (!q.exec(QStringLiteral(
                 "ALTER TABLE folder_groups ADD COLUMN group_name TEXT"))) {
             qWarning() << "Could not add folder_groups.group_name:"
+                       << q.lastError().text();
+        }
+    }
+
+    // deleted_locally and pending_tags were added later
+    if (!m_db.record(QStringLiteral("pdf_files")).contains(
+            QStringLiteral("deleted_locally"))) {
+        if (!q.exec(QStringLiteral(
+                "ALTER TABLE pdf_files ADD COLUMN deleted_locally BOOLEAN NOT NULL DEFAULT 0"))) {
+            qWarning() << "Could not add pdf_files.deleted_locally:"
+                       << q.lastError().text();
+        }
+    }
+    if (!m_db.record(QStringLiteral("pdf_files")).contains(
+            QStringLiteral("pending_tags"))) {
+        if (!q.exec(QStringLiteral(
+                "ALTER TABLE pdf_files ADD COLUMN pending_tags BOOLEAN NOT NULL DEFAULT 0"))) {
+            qWarning() << "Could not add pdf_files.pending_tags:"
                        << q.lastError().text();
         }
     }
@@ -259,6 +288,7 @@ QList<PdfFile> DatabaseManager::loadAllFiles() const
         SELECT id, path, folder_path, file_name, file_size,
                last_modified, last_opened, page_count
         FROM   pdf_files
+        WHERE  deleted_locally = 0
         ORDER  BY file_name COLLATE NOCASE
     )"), m_db);
 
@@ -319,7 +349,7 @@ bool DatabaseManager::saveFile(PdfFile& file)
 bool DatabaseManager::deleteFile(const QString& filePath)
 {
     QSqlQuery q(m_db);
-    q.prepare(QStringLiteral("DELETE FROM pdf_files WHERE path = :p"));
+    q.prepare(QStringLiteral("UPDATE pdf_files SET deleted_locally = 1 WHERE path = :p"));
     q.bindValue(QStringLiteral(":p"), filePath);
     return q.exec();
 }
@@ -373,6 +403,24 @@ QStringList DatabaseManager::getFileTags(int pdfId) const
     q.exec();
     while (q.next())
         result << q.value(0).toString();
+    return result;
+}
+
+bool DatabaseManager::setPendingTags(int fileId, bool pending)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("UPDATE pdf_files SET pending_tags = :p WHERE id = :id"));
+    q.bindValue(QStringLiteral(":p"), pending ? 1 : 0);
+    q.bindValue(QStringLiteral(":id"), fileId);
+    return q.exec();
+}
+
+QList<int> DatabaseManager::getFilesWithPendingTags() const
+{
+    QList<int> result;
+    QSqlQuery q(QStringLiteral("SELECT id FROM pdf_files WHERE pending_tags = 1"), m_db);
+    while (q.next())
+        result << q.value(0).toInt();
     return result;
 }
 
@@ -572,6 +620,48 @@ QString DatabaseManager::folderForGroup(int groupId) const
     if (q.exec() && q.next())
         return q.value(0).toString();
     return {};
+}
+
+// ── Pending Notes ─────────────────────────────────────────────────────────────
+
+bool DatabaseManager::savePendingNote(int fileId, const QString& body)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("INSERT INTO pending_notes (pdf_id, body) VALUES (:f, :b)"));
+    q.bindValue(QStringLiteral(":f"), fileId);
+    q.bindValue(QStringLiteral(":b"), body);
+    return q.exec();
+}
+
+QStringList DatabaseManager::getPendingNotes(int fileId) const
+{
+    QStringList result;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT body FROM pending_notes WHERE pdf_id = :f ORDER BY id ASC"));
+    q.bindValue(QStringLiteral(":f"), fileId);
+    if (q.exec()) {
+        while (q.next()) {
+            result << q.value(0).toString();
+        }
+    }
+    return result;
+}
+
+bool DatabaseManager::clearPendingNotes(int fileId)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM pending_notes WHERE pdf_id = :f"));
+    q.bindValue(QStringLiteral(":f"), fileId);
+    return q.exec();
+}
+
+QList<int> DatabaseManager::getFilesWithPendingNotes() const
+{
+    QList<int> result;
+    QSqlQuery q(QStringLiteral("SELECT DISTINCT pdf_id FROM pending_notes"), m_db);
+    while (q.next())
+        result << q.value(0).toInt();
+    return result;
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

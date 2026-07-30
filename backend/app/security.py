@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
+import logging
 import bcrypt
 import jwt
 
@@ -16,6 +17,7 @@ TokenType = Literal["access", "refresh"]
 # bcrypt hashes at most 72 bytes and errors on longer input in 4.x, so the
 # password is pre-hashed to a fixed-width digest first. This also means a very
 # long passphrase keeps all of its entropy instead of being silently truncated.
+logger = logging.getLogger(__name__)
 _BCRYPT_ROUNDS = 12
 
 
@@ -70,12 +72,15 @@ def decode_token(token: str, expected_type: TokenType) -> int | None:
         payload = jwt.decode(
             token, settings.jwt_secret, algorithms=[settings.jwt_algorithm]
         )
-    except jwt.PyJWTError:
+    except jwt.PyJWTError as e:
+        logger.error(f"Exception decoding JWT: {e}")
         return None
 
     if payload.get("typ") != expected_type:
         return None
+
     try:
         return int(payload["sub"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError) as e:
+        logger.info(f"Conversion error: {e}")
         return None

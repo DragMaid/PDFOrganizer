@@ -19,7 +19,7 @@ from .errors import (
     unhandled_exception_handler,
     validation_exception_handler,
 )
-from .routers import auth, files, groups, notes, tags
+from .routers import auth, files, groups, notes, tags, ws
 
 logging.basicConfig(level=logging.INFO)
 
@@ -73,6 +73,7 @@ app.include_router(files.router)
 app.include_router(files.sync_router)
 app.include_router(tags.router)
 app.include_router(notes.router)
+app.include_router(ws.router)
 
 
 @app.get("/health", tags=["meta"])

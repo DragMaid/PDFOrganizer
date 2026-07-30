@@ -173,7 +173,20 @@ ApiSyncStatus ApiSyncStatus::fromJson(const QJsonObject& obj)
     status.uploadedFiles = obj.value(QStringLiteral("uploaded_files")).toInt();
     for (const QJsonValue& item : obj.value(QStringLiteral("pending")).toArray())
         status.pending << ApiFile::fromJson(item.toObject());
+    for (const QJsonValue& item : obj.value(QStringLiteral("files")).toArray())
+        status.files << ApiFile::fromJson(item.toObject());
     return status;
+}
+
+ApiFileRemoval ApiFileRemoval::fromJson(const QJsonObject& obj)
+{
+    ApiFileRemoval removal;
+    removal.fileId          = obj.value(QStringLiteral("file_id")).toInt(-1);
+    removal.detached        = obj.value(QStringLiteral("detached")).toBool();
+    removal.purged          = obj.value(QStringLiteral("purged")).toBool();
+    removal.stillReferenced = obj.value(QStringLiteral("still_referenced")).toBool();
+    removal.message         = obj.value(QStringLiteral("message")).toString();
+    return removal;
 }
 
 ApiUploadResult ApiUploadResult::fromJson(const QJsonObject& obj)

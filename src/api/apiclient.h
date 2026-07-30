@@ -7,6 +7,7 @@
 #include "apitypes.h"
 
 class QNetworkReply;
+class QWebSocket;
 
 /**
  * @brief Every network call the application makes.
@@ -107,8 +108,15 @@ public:
                        const QString& fileName, qint64 fileSizeBytes,
                        int pageCount, Handler<ApiFile> onOk,
                        ErrorHandler onError = {});
-    void removeFile   (int groupId, int fileId, VoidHandler onOk,
-                       ErrorHandler onError = {});
+    /// Take a file out of a group. With @p deleteStoredCopy the bytes are also
+    /// destroyed in cloud storage — irreversible, owner-only, and refused by
+    /// the server for anyone else. The server skips the destruction (and says
+    /// so in the result) when another group still shares the same content.
+    ///
+    /// This is never called because a PDF vanished from disk: losing a local
+    /// copy is a download waiting to happen, not a removal.
+    void removeFile   (int groupId, int fileId, bool deleteStoredCopy,
+                       Handler<ApiFileRemoval> onOk, ErrorHandler onError = {});
 
     // ── Tags ──────────────────────────────────────────────────────────────────
     void listAllTags   (Handler<QList<ApiTag>> onOk, ErrorHandler onError = {});
@@ -170,6 +178,7 @@ signals:
     /// The refresh token is gone or rejected; the user must sign in again.
     void sessionExpired();
     void authenticatedChanged(bool authenticated);
+    void syncNeeded();
 
 private:
     using RawHandler = std::function<void(const QJsonDocument&)>;
@@ -200,4 +209,6 @@ private:
     QString               m_refreshToken;
     ApiUser               m_user;
     bool                  m_refreshing = false;
+    QWebSocket*           m_webSocket = nullptr;
+    void connectWebSocket();
 };

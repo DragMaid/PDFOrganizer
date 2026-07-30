@@ -305,10 +305,110 @@ def test_removing_a_file_from_a_group_leaves_other_groups_alone(alice):
     alice.post(f"/groups/{first}/files/{file['id']}/tags", json={"name": "keep"})
     alice.post(f"/groups/{second}/files/{file['id']}/tags", json={"name": "keep"})
 
-    assert alice.delete(f"/groups/{first}/files/{file['id']}").status_code == 204
+    removed = alice.delete(f"/groups/{first}/files/{file['id']}")
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["detached"] is True
+    assert removed.json()["purged"] is False
     assert alice.get(f"/groups/{first}/files").json() == []
     assert len(alice.get(f"/groups/{second}/files").json()) == 1
     assert len(alice.get(f"/groups/{second}/files/{file['id']}/tags").json()) == 1
+
+
+# ── Removing a file: detaching and destroying are different acts ──────────────
+
+
+def _stored_file(account, group_id, monkeypatch, content_hash=HASH_A, name="a.pdf"):
+    """Register and upload one file, with B2 stubbed out. Returns the file."""
+    from app import storage as storage_module
+
+    monkeypatch.setattr(
+        storage_module.storage, "upload", lambda content, name: "b2-file-id"
+    )
+    file = register_file(account, group_id, content_hash, name)
+    uploaded = account.post(
+        f"/groups/{group_id}/files/{file['id']}/upload",
+        files={"content": (name, b"pdf-a", "application/pdf")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    return file
+
+
+def test_purging_deletes_the_stored_blob_and_the_record(alice, monkeypatch):
+    from app import storage as storage_module
+
+    group_id = shared_group(alice)
+    file = _stored_file(alice, group_id, monkeypatch)
+
+    deleted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        storage_module.storage,
+        "delete",
+        lambda file_id, file_name: deleted.append((file_id, file_name)),
+    )
+
+    response = alice.delete(f"/groups/{group_id}/files/{file['id']}?purge=true")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["purged"] is True
+    assert body["still_referenced"] is False
+    assert deleted == [("b2-file-id", f"files/{HASH_A[:2]}/{HASH_A}.pdf")]
+    assert alice.get(f"/groups/{group_id}/files").json() == []
+
+
+def test_only_the_owner_may_delete_the_stored_copy(alice, bob, monkeypatch):
+    from app import storage as storage_module
+
+    group_id = shared_group(alice, bob)
+    file = _stored_file(alice, group_id, monkeypatch)
+
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        storage_module.storage,
+        "delete",
+        lambda file_id, file_name: deleted.append(file_id),
+    )
+
+    refused = bob.delete(f"/groups/{group_id}/files/{file['id']}?purge=true")
+    assert refused.status_code == 403
+    assert refused.json()["code"] == "forbidden"
+    # Refused before anything happened: the group still lists it and the blob
+    # was never touched.
+    assert deleted == []
+    assert len(alice.get(f"/groups/{group_id}/files").json()) == 1
+
+    # Detaching without a purge is still an everyday act for a member.
+    plain = bob.delete(f"/groups/{group_id}/files/{file['id']}")
+    assert plain.status_code == 200, plain.text
+    assert plain.json()["purged"] is False
+    assert deleted == []
+
+
+def test_a_purge_spares_a_blob_another_group_still_shares(alice, monkeypatch):
+    from app import storage as storage_module
+
+    first = shared_group(alice)
+    second = alice.post("/groups", json={"name": "Second"}).json()["id"]
+    file = _stored_file(alice, first, monkeypatch)
+    register_file(alice, second, HASH_A, "a.pdf")
+
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        storage_module.storage,
+        "delete",
+        lambda file_id, file_name: deleted.append(file_id),
+    )
+
+    response = alice.delete(f"/groups/{first}/files/{file['id']}?purge=true")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["detached"] is True
+    assert body["purged"] is False
+    assert body["still_referenced"] is True
+    assert deleted == []
+
+    # The other group's copy is untouched and still downloadable.
+    theirs = alice.get(f"/groups/{second}/files").json()
+    assert len(theirs) == 1 and theirs[0]["uploaded"] is True
 
 
 # ── Tags: races are resolved by leaving things be ─────────────────────────────
@@ -525,6 +625,24 @@ def test_sync_status_lists_files_awaiting_upload(alice):
     assert status["total_files"] == 2
     assert status["uploaded_files"] == 0
     assert len(status["pending"]) == 2
+    # The full list rides along so a client can work out its download side —
+    # which files the group has that this machine does not — in one round trip.
+    assert {f["content_hash"] for f in status["files"]} == {HASH_A, HASH_B}
+
+
+def test_sync_status_separates_uploaded_files_from_pending_ones(alice, monkeypatch):
+    group_id = shared_group(alice)
+    _stored_file(alice, group_id, monkeypatch, HASH_A, "a.pdf")
+    register_file(alice, group_id, HASH_B, "b.pdf")
+
+    status = alice.get(f"/groups/{group_id}/sync-status").json()
+    assert status["uploaded_files"] == 1
+    assert [f["content_hash"] for f in status["pending"]] == [HASH_B]
+    assert len(status["files"]) == 2
+    assert {f["content_hash"]: f["uploaded"] for f in status["files"]} == {
+        HASH_A: True,
+        HASH_B: False,
+    }
 
 
 def test_upload_rejects_bytes_that_do_not_match_the_registration(alice):

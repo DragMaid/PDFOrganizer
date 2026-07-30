@@ -153,9 +153,28 @@ struct ApiSyncStatus
     int           groupId = -1;
     int           totalFiles = 0;
     int           uploadedFiles = 0;
+    /// Registered in the group but never uploaded — the upload side of a sync.
     QList<ApiFile> pending;
+    /// Every file in the group. The server cannot know what this machine holds
+    /// on disk, so the download side is worked out here by subtracting the
+    /// content hashes we already have from this list.
+    QList<ApiFile> files;
 
     static ApiSyncStatus fromJson(const QJsonObject& obj);
+};
+
+/// What a removal actually did. Detaching a file from a group and destroying
+/// the stored copy are separate acts: the second is owner-only and is skipped
+/// when another group still shares the same content.
+struct ApiFileRemoval
+{
+    int     fileId = -1;
+    bool    detached = false;
+    bool    purged = false;
+    bool    stillReferenced = false;
+    QString message;
+
+    static ApiFileRemoval fromJson(const QJsonObject& obj);
 };
 
 struct ApiUploadResult

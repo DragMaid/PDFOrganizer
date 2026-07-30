@@ -14,7 +14,7 @@ renaming onto a name that is taken — produce an error the client will show.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, BackgroundTasks, Response, status
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
@@ -23,6 +23,7 @@ from ..deps import CurrentUser, DbSession, group_file_or_404, group_or_404
 from ..errors import bad_request, conflict, not_found
 from ..models import FileTag, GroupMember, Tag
 from ..schemas import TagAssign, TagCreate, TagOut, TagSet
+from .ws import manager
 
 router = APIRouter(tags=["tags"])
 
@@ -99,6 +100,7 @@ def rename_tag(
     payload: TagCreate,
     user: CurrentUser,
     db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> Tag:
     group_or_404(db, group_id, user)
     tag = db.get(Tag, tag_id)
@@ -121,13 +123,14 @@ def rename_tag(
     tag.name_lower = lower
     db.commit()
     db.refresh(tag)
+    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
     return tag
 
 
 @router.delete(
     "/groups/{group_id}/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT
 )
-def delete_tag(group_id: int, tag_id: int, user: CurrentUser, db: DbSession) -> None:
+def delete_tag(group_id: int, tag_id: int, user: CurrentUser, db: DbSession, background_tasks: BackgroundTasks) -> None:
     group_or_404(db, group_id, user)
     tag = db.get(Tag, tag_id)
     if tag is None or tag.group_id != group_id:
@@ -135,6 +138,7 @@ def delete_tag(group_id: int, tag_id: int, user: CurrentUser, db: DbSession) -> 
         return
     db.delete(tag)
     db.commit()
+    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
 
 
 # ── Assignment ────────────────────────────────────────────────────────────────
@@ -171,6 +175,7 @@ def add_file_tag(
     payload: TagAssign,
     user: CurrentUser,
     db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> list[Tag]:
     """Add one tag to a file. Idempotent — a tag another member already added
     is left exactly as it is and the call still succeeds."""
@@ -184,6 +189,7 @@ def add_file_tag(
         .on_conflict_do_nothing(index_elements=["file_id", "tag_id"])
     )
     db.commit()
+    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
     return list_file_tags(group_id, file_id, user, db)
 
 
@@ -196,6 +202,7 @@ def set_file_tags(
     payload: TagSet,
     user: CurrentUser,
     db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> list[Tag]:
     """Replace this file's tags within the group.
 
@@ -231,6 +238,7 @@ def set_file_tags(
             .on_conflict_do_nothing(index_elements=["file_id", "tag_id"])
         )
     db.commit()
+    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
     return list_file_tags(group_id, file_id, user, db)
 
 
@@ -244,7 +252,8 @@ def remove_file_tag(
     tag_id: int,
     user: CurrentUser,
     db: DbSession,
-) -> None:
+    background_tasks: BackgroundTasks,
+) -> Response:
     """Remove a tag from a file. Also idempotent — if another member removed it
     first, the caller still gets a success."""
     group_or_404(db, group_id, user)

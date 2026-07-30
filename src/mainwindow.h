@@ -101,6 +101,11 @@ private slots:
     // ── PDF events ────────────────────────────────────────────────────────────
     void onFileActivated   (const QString& filePath);
     void onEditTagsRequested(const QString& filePath);
+    /// Take a file out of its group, and — only if asked, and only for the
+    /// owner — out of cloud storage too. This is the *only* path that destroys
+    /// a shared copy; a PDF that merely disappeared from disk is re-downloaded
+    /// by the next sync instead.
+    void onRemoveFileRequested(const QString& filePath);
     void onPdfOpened       (const QString& filePath, const QDateTime& when);
     void onFileSelected    (const QString& filePath);
 
@@ -209,6 +214,49 @@ private:
     void registerNext(const QString& folderPath, int groupId,
                       QStringList pending);
 
+    // ── How far out of sync a group is ────────────────────────────────────────
+
+    /// What syncing the active group would do right now, in both directions.
+    ///
+    /// The server cannot answer this alone: it knows which files it stores, and
+    /// only this machine knows which of them are actually on disk here. So the
+    /// two halves are matched by content hash — the same identity the backend
+    /// keys files by — and a file this machine no longer holds is a download,
+    /// exactly like a file nobody has uploaded yet is an upload.
+    struct SyncPlan
+    {
+        QList<ApiFile> toUpload;    ///< Held here; the group has no copy stored.
+        QList<ApiFile> toDownload;  ///< Stored for the group; missing here.
+        /// PDFs sitting in the folder that the group has never been told about.
+        /// They become uploads the moment they are registered, so they count
+        /// towards the "ahead" number from the start.
+        int unregistered = 0;
+        /// Tag and note edits made offline that still have to go up.
+        int pendingMetadata = 0;
+
+        [[nodiscard]] int uploads()   const { return toUpload.size() + unregistered; }
+        [[nodiscard]] int downloads() const { return toDownload.size(); }
+    };
+
+    /// Match @p status against what is on disk for @p groupId. Not const: it
+    /// hashes local files, and hashing caches.
+    [[nodiscard]] SyncPlan planSync(int groupId, const ApiSyncStatus& status);
+
+    /// Ask the server for the group's files and restate the Sync button.
+    /// Cheap to call: it only makes a request when the active group changed or
+    /// @p force says something happened that the counts cannot predict.
+    void refreshSyncCounts(bool force = false);
+    /// Redraw the Sync button from the last counts we were given.
+    void updateSyncButton();
+    /// Something local changed that makes the counts stale — recount.
+    void markSyncPending();
+
+    void syncPendingData(int groupId, std::function<void()> onDone);
+    void syncNextPendingFile(int groupId, QStringList pending, std::function<void()> onDone);
+    void syncNextPendingTag(int groupId, QList<int> pendingFiles, std::function<void()> onDone);
+    void syncNextPendingNote(int groupId, QList<int> pendingFiles, std::function<void()> onDone);
+    void syncNotesForFile(int groupId, int remoteFileId, int localFileId, QStringList notes, std::function<void()> onDone);
+
     /// SHA-256 for a local file, cached in SQLite so a file is hashed once.
     QString contentHashFor(const QString& filePath);
 
@@ -227,8 +275,16 @@ private:
     [[nodiscard]] ApiGroup groupByName(const QString& name) const;
 
     void showError(const ApiError& error);
+
+    /// Carry out @p plan: uploads first, then downloads, then one summary.
+    void runSync(int groupId, const ApiGroup& group, const SyncPlan& plan);
+
+    /// Send each pending file's bytes, then hand the totals to @p onDone —
+    /// which is where the download half of a sync picks up.
     void uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
-                    int skipped, class QProgressDialog* progress);
+                    int skipped, class QProgressDialog* progress,
+                    std::function<void(int uploaded, int skipped,
+                                       bool canceled)> onDone);
 
     // ── Joining a shared group ────────────────────────────────────────────────
 
@@ -249,10 +305,15 @@ private:
     /// its PDFs visible in the rest of the UI.
     void watchJoinedFolder(const QString& folderPath);
 
-    /// Download the group's files into @p folderPath, one at a time.
+    /// Download the group's files into @p folderPath, one at a time, then hand
+    /// the totals to @p onDone. Both callers — joining a shared folder and the
+    /// download half of a sync — want the same transfer but a different ending,
+    /// so the ending is theirs to write.
     void downloadNext(int groupId, const QString& folderPath,
                       QList<ApiFile> pending, QStringList taken, int downloaded,
-                      int skipped, class QProgressDialog* progress);
+                      int skipped, class QProgressDialog* progress,
+                      std::function<void(int downloaded, int skipped,
+                                         bool canceled)> onDone);
 
     /// A local file name for @p file that is safe to create inside
     /// @p folderPath: the display name stripped of any directory part, made
@@ -332,4 +393,13 @@ private:
     /// scan cannot create a second group under the same name.
     QSet<QString>    m_foldersCreatingGroup;
     bool             m_signingIn = false;
+
+    // ── Sync button state ─────────────────────────────────────────────────────
+    /// The group the counts below describe, so a reply that arrives after the
+    /// selection moved on is discarded instead of mislabelling another group.
+    int              m_syncCountsGroupId = -1;
+    int              m_syncUploads   = 0;
+    int              m_syncDownloads = 0;
+    int              m_syncPendingMeta = 0;
+    bool             m_syncCountsInFlight = false;
 };

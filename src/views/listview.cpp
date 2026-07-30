@@ -147,6 +147,11 @@ void ListView::showContextMenu(const QPoint& pos)
     QAction* openAct = menu.addAction(QStringLiteral("Open PDF"));
     menu.addSeparator();
     QAction* tagAct  = menu.addAction(QStringLiteral("Edit Tags…"));
+    menu.addSeparator();
+    QAction* removeAct = menu.addAction(QStringLiteral("Remove from Group…"));
+    removeAct->setToolTip(QStringLiteral(
+        "Take this file out of its shared group. Deleting the PDF in a file "
+        "manager does not do this."));
 
     const QAction* chosen = menu.exec(m_tableView->viewport()->mapToGlobal(pos));
     if (!chosen) return;
@@ -155,4 +160,6 @@ void ListView::showContextMenu(const QPoint& pos)
         emit fileActivated(path);
     else if (chosen == tagAct)
         emit editTagsRequested(path);
+    else if (chosen == removeAct)
+        emit removeFileRequested(path);
 }

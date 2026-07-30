@@ -127,6 +127,20 @@ class FileOut(BaseModel):
     tags: list[str] = []
 
 
+class FileRemoveResult(BaseModel):
+    """What a DELETE actually did — detaching and purging are separate acts."""
+
+    file_id: int
+    #: The group no longer lists the file. Always true on success.
+    detached: bool
+    #: The blob was deleted from Backblaze and the file record dropped.
+    purged: bool
+    #: A purge was asked for but skipped because another group still holds the
+    #: same content — deleting the blob would break that group's copy.
+    still_referenced: bool
+    message: str
+
+
 # ── Tags ──────────────────────────────────────────────────────────────────────
 
 
@@ -186,6 +200,11 @@ class SyncStatusOut(BaseModel):
     total_files: int
     uploaded_files: int
     pending: list[FileOut]
+    # Every file in the group, uploaded or not. The server cannot know what a
+    # member holds on disk, so the download side of "what is out of sync" is
+    # computed on the client — it needs the full list plus each content hash to
+    # do it, and shipping it here keeps a sync to one round trip.
+    files: list[FileOut]
 
 
 class UploadResult(BaseModel):

@@ -9,11 +9,13 @@ set(CMAKE_AUTOUIC ON)
 
 # ── Find Qt6 ──────────────────────────────────────────────────────────────────
 find_package(Qt6 REQUIRED COMPONENTS
-    Core Widgets Sql Concurrent Network
+    Core Widgets Sql Concurrent Network WebSockets
 )
 
 # Optional: Qt6::Pdf for thumbnail generation (Qt 6.4+)
 find_package(Qt6 QUIET COMPONENTS Pdf)
+
+find_package(Qt6 REQUIRED COMPONENTS WebSockets)
 
 # ── Sources ───────────────────────────────────────────────────────────────────
 set(SOURCES
@@ -91,6 +93,7 @@ target_link_libraries(PDFOrganizer PRIVATE
     Qt6::Sql
     Qt6::Concurrent
     Qt6::Network
+    Qt6::WebSockets
 )
 
 if(Qt6Pdf_FOUND)
@@ -124,7 +127,7 @@ if(BUILD_API_SMOKETEST)
         src/api/apitypes.h
     )
     target_include_directories(apiclient_smoketest PRIVATE src)
-    target_link_libraries(apiclient_smoketest PRIVATE Qt6::Core Qt6::Network)
+    target_link_libraries(apiclient_smoketest PRIVATE Qt6::Core Qt6::Network Qt6::WebSockets)
 endif()
 
 # ── Install ───────────────────────────────────────────────────────────────────

@@ -16,14 +16,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, status, BackgroundTasks, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..deps import CurrentUser, DbSession, group_file_or_404, group_or_404
 from ..errors import bad_request, conflict, forbidden, not_found
 from ..models import Note, User
-from ..schemas import NoteCreate, NoteOut, NoteUpdate
+from ..schemas import NoteOut, NoteCreate, NoteUpdate
+from .ws import manager
 
 router = APIRouter(tags=["notes"])
 
@@ -85,6 +86,7 @@ def create_note(
     payload: NoteCreate,
     user: CurrentUser,
     db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> NoteOut:
     group_or_404(db, group_id, user)
     group_file_or_404(db, group_id, file_id)
@@ -103,12 +105,17 @@ def create_note(
     db.add(note)
     db.commit()
     db.refresh(note)
+    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
     return _to_out(note, user, user.id)
 
 
 @router.patch("/notes/{note_id}", response_model=NoteOut)
 def update_note(
-    note_id: int, payload: NoteUpdate, user: CurrentUser, db: DbSession
+    note_id: int,
+    payload: NoteUpdate,
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> NoteOut:
     note, author = _load(db, note_id)
     # Membership is still required to even see the note...
@@ -137,11 +144,16 @@ def update_note(
     note.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(note)
+    background_tasks.add_task(manager.broadcast_to_group, note.group_id, "sync_needed", db)
     return _to_out(note, author, user.id)
 
 
 @router.delete("/notes/{note_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_note(note_id: int, user: CurrentUser, db: DbSession) -> None:
+def delete_note(
+    note_id: int,
+    user: CurrentUser,
+    db: DbSession,
+) -> Response:
     note, author = _load(db, note_id)
     group_or_404(db, note.group_id, user)
     if note.author_id != user.id:
@@ -153,3 +165,4 @@ def delete_note(note_id: int, user: CurrentUser, db: DbSession) -> None:
     # Soft delete keeps the row for auditing while hiding it everywhere.
     note.deleted_at = datetime.now(timezone.utc)
     db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

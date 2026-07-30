@@ -63,6 +63,14 @@ public:
     // ── Tag assignments ───────────────────────────────────────────────────────
     bool            setFileTags (int fileId, const QStringList& tags);
     QStringList     getFileTags (int fileId)            const;
+    bool            setPendingTags(int fileId, bool pending);
+    QList<int>      getFilesWithPendingTags() const;
+
+    // ── Pending Notes ─────────────────────────────────────────────────────────
+    bool            savePendingNote(int fileId, const QString& body);
+    QStringList     getPendingNotes(int fileId) const;
+    bool            clearPendingNotes(int fileId);
+    QList<int>      getFilesWithPendingNotes() const;
 
     // ── Settings key-value ────────────────────────────────────────────────────
     QVariant        getSetting(const QString& key, const QVariant& defaultValue = {}) const;

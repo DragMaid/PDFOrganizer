@@ -220,8 +220,69 @@ class B2Storage:
         raise B2Error("Backblaze kept rejecting the download. Try again.")
 
 
+    # ── Delete ────────────────────────────────────────────────────────────────
+
+    def delete(self, b2_file_id: str, b2_file_name: str) -> None:
+        """Permanently remove one stored blob.
+
+        Both the id and the name are required by B2, which versions objects by
+        name. Callers must be sure nothing else still points at the blob: it is
+        deduplicated by content hash, so one delete can strip the bytes from
+        every group holding that PDF.
+
+        Idempotent — a blob B2 no longer has is treated as already deleted, so
+        retrying a half-finished removal converges instead of failing.
+        """
+        settings = get_settings()
+        if not settings.b2_configured:
+            raise ApiError(
+                503,
+                "storage_unconfigured",
+                "File storage is not configured on the server. Ask an "
+                "administrator to set the PDFORG_B2_* environment variables.",
+            )
+
+        for attempt in range(2):
+            auth = self._current_auth(force=attempt > 0)
+            try:
+                response = httpx.post(
+                    f"{auth.api_url}/b2api/v3/b2_delete_file_version",
+                    headers={"Authorization": auth.authorization_token},
+                    json={"fileId": b2_file_id, "fileName": b2_file_name},
+                    timeout=60.0,
+                )
+            except httpx.HTTPError as exc:
+                raise B2Error(f"Deleting from Backblaze failed: {exc}") from exc
+
+            if response.status_code == 401 and attempt == 0:
+                log.warning("B2 delete token expired; re-authorizing")
+                continue
+            if response.status_code == 200:
+                return
+            if _is_already_gone(response):
+                log.info("B2 blob %s was already gone", b2_file_id)
+                return
+            raise B2Error(
+                f"Backblaze refused to delete the file ({response.status_code}). "
+                "Nothing was removed from storage."
+            )
+
+        raise B2Error("Backblaze kept rejecting the delete. Try again.")
+
+
 class _Unauthorized(Exception):
     """Internal signal to re-authorize and retry."""
+
+
+def _is_already_gone(response: httpx.Response) -> bool:
+    """True when B2 is saying the object is not there, which is what we wanted."""
+    if response.status_code not in (400, 404):
+        return False
+    try:
+        code = response.json().get("code", "")
+    except ValueError:
+        return False
+    return code in ("file_not_present", "no_such_file", "not_found")
 
 
 def _percent_encode(name: str) -> str:

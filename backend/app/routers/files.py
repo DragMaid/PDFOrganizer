@@ -8,7 +8,13 @@ fighting each other.
 
 Sync runs in both directions. ``upload`` pushes bytes a member holds locally;
 ``content`` pulls them back down, which is how someone who joins a group with
-its share code ends up with the actual PDFs and not just their names.
+its share code ends up with the actual PDFs and not just their names — and how
+a member who deleted a PDF from their disk gets it back.
+
+Removal is deliberately two-tiered. Detaching a file from a group is an
+everyday act any member may perform and leaves the stored bytes alone.
+Destroying the stored copy (``?purge=true``) is owner-only, irreversible, and
+refuses to strip a blob another group still shares.
 """
 
 from __future__ import annotations
@@ -17,16 +23,23 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
-from fastapi import APIRouter, File as UploadField, Response, UploadFile, status
+from fastapi import APIRouter, File as UploadField, Response, UploadFile, status, BackgroundTasks
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ..deps import CurrentUser, DbSession, group_file_or_404, group_or_404
-from ..errors import ApiError, bad_request, conflict
-from ..models import File, FileTag, GroupFile, Note, Tag
-from ..schemas import FileOut, FileRegister, SyncStatusOut, UploadResult
+from ..errors import ApiError, bad_request, conflict, forbidden
+from ..models import ROLE_OWNER, File, FileTag, GroupFile, Note, Tag
+from ..schemas import (
+    FileOut,
+    FileRegister,
+    FileRemoveResult,
+    SyncStatusOut,
+    UploadResult,
+)
 from ..storage import object_name_for, sha256_of, storage
+from .ws import manager
 
 router = APIRouter(prefix="/groups/{group_id}/files", tags=["files"])
 
@@ -130,18 +143,59 @@ def get_file(
     return _to_out(file, link, tags.get(file.id, []))
 
 
-@router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{file_id}", response_model=FileRemoveResult)
 def remove_file(
-    group_id: int, file_id: int, user: CurrentUser, db: DbSession
-) -> None:
-    """Detach a file from this group.
+    group_id: int,
+    file_id: int,
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
+    purge: bool = False,
+) -> FileRemoveResult:
+    """Detach a file from this group, and optionally destroy the stored copy.
 
-    Any member may do this. The file row and its blob survive because other
-    groups may still reference the same content; only this group's notes and
-    tag assignments go away.
+    Any member may detach. This group's notes and tag assignments go away; by
+    default the file row and its blob survive, because other groups may still
+    reference the same content.
+
+    ``purge=true`` additionally deletes the bytes from Backblaze and drops the
+    file record. That is irreversible and affects everyone, so it is restricted
+    to the group's owner — and it is skipped when another group still links the
+    same content hash, since blobs are deduplicated and the delete would strip
+    the file out from under that group too. The response says which of the two
+    actually happened.
+
+    Deleting a PDF from a member's disk never reaches this endpoint; only an
+    explicit removal in the app does.
     """
-    group_or_404(db, group_id, user)
-    group_file_or_404(db, group_id, file_id)
+    _, member = group_or_404(db, group_id, user)
+    file, _link = group_file_or_404(db, group_id, file_id)
+
+    if purge and member.role != ROLE_OWNER:
+        raise forbidden(
+            "Only the group's owner can delete a file's stored copy. You can "
+            "remove it from the group without deleting the stored copy."
+        )
+
+    # Asked before anything is detached, so a failure to reach B2 below leaves
+    # the database exactly as it was.
+    still_referenced = (
+        db.execute(
+            select(GroupFile.file_id)
+            .where(GroupFile.file_id == file_id, GroupFile.group_id != group_id)
+            .limit(1)
+        ).first()
+        is not None
+    )
+
+    purged = False
+    if purge and not still_referenced and file.b2_file_id is not None:
+        # B2 first: if it refuses, nothing has been detached yet and the owner
+        # can retry against an unchanged group.
+        storage.delete(
+            file.b2_file_id, file.b2_file_name or object_name_for(file.content_hash)
+        )
+        purged = True
 
     db.execute(delete(Note).where(Note.group_id == group_id, Note.file_id == file_id))
     db.execute(
@@ -150,12 +204,42 @@ def remove_file(
             FileTag.tag_id.in_(select(Tag.id).where(Tag.group_id == group_id)),
         )
     )
+    # Core DELETE rather than db.delete(link): these run in the order written,
+    # so the link is gone before the file row below takes its cascade with it.
     db.execute(
         delete(GroupFile).where(
             GroupFile.group_id == group_id, GroupFile.file_id == file_id
         )
     )
+
+    if purge and not still_referenced:
+        # Nothing points at the content any more, so the row would only be a
+        # tombstone claiming an upload that no longer exists. Registering the
+        # same PDF again later starts clean.
+        db.delete(file)
+
     db.commit()
+    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+
+    if not purge:
+        message = "Removed from the group. The stored copy was kept."
+    elif still_referenced:
+        message = (
+            "Removed from the group, but the stored copy was kept: another "
+            "group holds the same file and shares that copy."
+        )
+    elif purged:
+        message = "Removed from the group and deleted from storage."
+    else:
+        message = "Removed from the group. It had never been uploaded."
+
+    return FileRemoveResult(
+        file_id=file_id,
+        detached=True,
+        purged=purged,
+        still_referenced=purge and still_referenced,
+        message=message,
+    )
 
 
 # ── Backblaze sync ────────────────────────────────────────────────────────────
@@ -166,7 +250,13 @@ sync_router = APIRouter(prefix="/groups/{group_id}", tags=["sync"])
 
 @sync_router.get("/sync-status", response_model=SyncStatusOut)
 def sync_status(group_id: int, user: CurrentUser, db: DbSession) -> SyncStatusOut:
-    """Which of this group's files still need their bytes uploaded."""
+    """What this group's files look like from the server's side.
+
+    ``pending`` is the upload side: files registered here whose bytes never
+    arrived. The download side cannot be answered here — only the client knows
+    what is on its own disk — so ``files`` carries the whole list, hashes
+    included, and the client subtracts what it already holds.
+    """
     group_or_404(db, group_id, user)
 
     rows = db.execute(
@@ -176,16 +266,14 @@ def sync_status(group_id: int, user: CurrentUser, db: DbSession) -> SyncStatusOu
         .order_by(GroupFile.display_name)
     ).all()
     tags = _tags_for(db, group_id, [file.id for file, _ in rows])
-    pending = [
-        _to_out(file, link, tags.get(file.id, []))
-        for file, link in rows
-        if file.b2_file_id is None
-    ]
+    files = [_to_out(file, link, tags.get(file.id, [])) for file, link in rows]
+    pending = [out for out in files if not out.uploaded]
     return SyncStatusOut(
         group_id=group_id,
         total_files=len(rows),
         uploaded_files=len(rows) - len(pending),
         pending=pending,
+        files=files,
     )
 
 
@@ -195,6 +283,7 @@ def upload_file(
     file_id: int,
     user: CurrentUser,
     db: DbSession,
+    background_tasks: BackgroundTasks,
     content: UploadFile = UploadField(...),
 ) -> UploadResult:
     """Push one file's bytes to Backblaze.
@@ -238,6 +327,7 @@ def upload_file(
     file.uploaded_at = datetime.now(timezone.utc)
     file.uploaded_by = user.id
     db.commit()
+    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
 
     return UploadResult(
         file_id=file.id,

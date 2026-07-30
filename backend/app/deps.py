@@ -68,6 +68,7 @@ def group_file_or_404(
     db: Session, group_id: int, file_id: int
 ) -> tuple[File, GroupFile]:
     link = db.get(GroupFile, {"group_id": group_id, "file_id": file_id})
+    # TODO: add proper file meta here later
     if link is None:
         raise not_found("That file")
     file = db.get(File, file_id)
