@@ -5,19 +5,25 @@ may already exist globally (someone else has the same PDF) and the group link
 may already exist (a second member added it first). Both are treated as
 success, which is what keeps two members scanning the same shared drive from
 fighting each other.
+
+Sync runs in both directions. ``upload`` pushes bytes a member holds locally;
+``content`` pulls them back down, which is how someone who joins a group with
+its share code ends up with the actual PDFs and not just their names.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
+from urllib.parse import quote
 
-from fastapi import APIRouter, File as UploadField, UploadFile, status
+from fastapi import APIRouter, File as UploadField, Response, UploadFile, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from ..deps import CurrentUser, DbSession, group_file_or_404, group_or_404
-from ..errors import bad_request
+from ..errors import ApiError, bad_request, conflict
 from ..models import File, FileTag, GroupFile, Note, Tag
 from ..schemas import FileOut, FileRegister, SyncStatusOut, UploadResult
 from ..storage import object_name_for, sha256_of, storage
@@ -239,6 +245,64 @@ def upload_file(
         already_present=False,
         b2_file_id=b2_file_id,
         message="Uploaded.",
+    )
+
+
+@sync_router.get(
+    "/files/{file_id}/content",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {}}}},
+)
+def download_file(
+    group_id: int, file_id: int, user: CurrentUser, db: DbSession
+) -> Response:
+    """Stream one file's bytes back to a member.
+
+    The mirror of :func:`upload_file`, and the reason joining a group can
+    reproduce its folder on a machine that never held the PDFs. The bytes come
+    through this process rather than a B2 URL, so membership is checked on every
+    single fetch and no storage credential reaches a client.
+    """
+    group_or_404(db, group_id, user)
+    file, link = group_file_or_404(db, group_id, file_id)
+
+    if file.b2_file_id is None:
+        raise conflict(
+            "not_uploaded",
+            f"'{link.display_name}' is registered in this group but its "
+            "contents were never uploaded. A member who holds the file needs to "
+            "sync it first.",
+        )
+
+    payload = storage.download(file.b2_file_id)
+
+    # A mismatch means the stored blob is not what this row claims to be.
+    # Handing it over under the wrong name would be worse than failing.
+    if sha256_of(payload) != file.content_hash:
+        raise ApiError(
+            status.HTTP_502_BAD_GATEWAY,
+            "storage_corrupt",
+            f"The stored copy of '{link.display_name}' does not match its "
+            "recorded checksum, so it was not served.",
+        )
+
+    return Response(
+        content=payload,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": _content_disposition(link.display_name),
+            "X-Content-Sha256": file.content_hash,
+        },
+    )
+
+
+def _content_disposition(display_name: str) -> str:
+    """``attachment`` with both an ASCII fallback and the real UTF-8 name."""
+    base = PurePosixPath(display_name.replace("\\", "/")).name or "document.pdf"
+    ascii_fallback = base.encode("ascii", "replace").decode("ascii").replace('"', "_")
+    return (
+        f'attachment; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{quote(base, safe='')}"
     )
 
 

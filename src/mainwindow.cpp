@@ -22,6 +22,7 @@
 // ─────────────────────────────────────────────────────────────────────
 #include "views/folderpanel.h"
 #include "views/gridview.h"
+#include "views/joingroupdialog.h"
 #include "views/listview.h"
 #include "views/logindialog.h"
 #include "views/recentview.h"
@@ -34,6 +35,7 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QDebug>
 #include <QDialog>
@@ -42,6 +44,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -277,6 +280,14 @@ void MainWindow::initMenuBar() {
   connect(addFolderAct, &QAction::triggered, this,
           &MainWindow::onAddFolderRequested);
 
+  m_joinFolderAction =
+      fileMenu->addAction(QStringLiteral("&Join Shared Folder…"));
+  m_joinFolderAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+O")));
+  m_joinFolderAction->setStatusTip(
+      QStringLiteral("Enter a share code to sync someone else's folder here"));
+  connect(m_joinFolderAction, &QAction::triggered, this,
+          &MainWindow::onJoinSharedFolder);
+
   fileMenu->addSeparator();
 
   m_signInAction = fileMenu->addAction(QStringLiteral("&Sign In…"));
@@ -467,8 +478,8 @@ void MainWindow::onAddFolderRequested() {
   // The group is created once the scan confirms there is at least one PDF —
   // see onScanFinished. Nothing to do here but say so.
   if (m_api->isAuthenticated()) {
-    m_scanLabel->setText(QStringLiteral("Scanning %1…")
-                             .arg(groupNameForFolder(dir)));
+    m_scanLabel->setText(
+        QStringLiteral("Scanning %1…").arg(groupNameForFolder(dir)));
   }
 }
 
@@ -646,20 +657,19 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
 
   // The backend creates any missing tags and treats a tag another member
   // already applied as a no-op, so there is nothing to reconcile here.
-  resolveRemoteFile(groupId, filePath, [this, groupId, filePath,
-                                        selected](int remoteFileId) {
-    m_api->setFileTags(
-        groupId, remoteFileId, selected,
-        [this, filePath](const QList<ApiTag> &tags) {
-          QStringList names;
-          for (const ApiTag &tag : tags)
-            names << tag.name;
+  resolveRemoteFile(
+      groupId, filePath, [this, groupId, filePath, selected](int remoteFileId) {
+        m_api->setFileTags(groupId, remoteFileId, selected,
+                           [this, filePath](const QList<ApiTag> &tags) {
+                             QStringList names;
+                             for (const ApiTag &tag : tags)
+                               names << tag.name;
 
-          m_tagCtrl->applyRemoteFileTags(filePath, names);
-          reloadTagVocabulary();
-          refreshDetailPane();
-        });
-  });
+                             m_tagCtrl->applyRemoteFileTags(filePath, names);
+                             reloadTagVocabulary();
+                             refreshDetailPane();
+                           });
+      });
 }
 
 void MainWindow::onPdfOpened(const QString & /*filePath*/,
@@ -803,6 +813,14 @@ void MainWindow::setCollaborationEnabled(bool enabled) {
     m_signInAction->setEnabled(!enabled);
   if (m_signOutAction)
     m_signOutAction->setEnabled(enabled);
+  // Redeeming a share code needs an account for the membership to attach to.
+  if (m_joinFolderAction) {
+    m_joinFolderAction->setEnabled(enabled);
+    m_joinFolderAction->setToolTip(
+        enabled ? QString{}
+                : QStringLiteral("Sign in first — joining a group needs an "
+                                 "account"));
+  }
   refreshDetailPane();
 }
 
@@ -934,17 +952,34 @@ void MainWindow::syncFolderGroup(const QString &folderPath) {
     return;
   }
 
+  // Sign-out clears the ids but keeps the name of the group this directory last
+  // belonged to, so re-attaching to it is tried before anything else. Role is
+  // not checked here: a folder joined by share code belongs to a group someone
+  // else owns, and its local name is unrelated to the group's, so the
+  // remembered name is the only thing that can find it again.
+  const QString remembered = m_db->folderGroupName(folderPath);
+  if (!remembered.isEmpty()) {
+    const ApiGroup previous = groupByName(remembered);
+    if (previous.isValid() && !previous.isPersonal) {
+      m_db->storeFolderGroup(folderPath, previous.id, previous.name);
+      trackFilesIn(previous.id, folderPath);
+      refreshDetailPane();
+      return;
+    }
+  }
+
   // A directory earns a group by holding a PDF of its own. Pure container
   // directories — ones whose PDFs all live further down — get nothing.
   if (filesIn(folderPath).isEmpty())
     return;
 
-  // Sign-out clears the id cache, so on the way back in we re-attach to the
-  // group we already own under this name rather than creating a second one.
+  // No memory of a previous group, so fall back to the name this directory
+  // implies, and adopt it only if we own it — someone else's group of the same
+  // name is a coincidence, not this folder.
   const QString name = groupNameForFolder(folderPath);
   const ApiGroup existing = groupByName(name);
   if (existing.isValid() && existing.isOwner() && !existing.isPersonal) {
-    m_db->storeFolderGroup(folderPath, existing.id);
+    m_db->storeFolderGroup(folderPath, existing.id, existing.name);
     trackFilesIn(existing.id, folderPath);
     refreshDetailPane();
     return;
@@ -961,7 +996,7 @@ void MainWindow::syncFolderGroup(const QString &folderPath) {
       name,
       [this, folderPath](const ApiGroup &group) {
         m_foldersCreatingGroup.remove(folderPath);
-        m_db->storeFolderGroup(folderPath, group.id);
+        m_db->storeFolderGroup(folderPath, group.id, group.name);
         reloadGroups([this, folderPath, group]() {
           trackFilesIn(group.id, folderPath);
           refreshDetailPane();
@@ -1114,7 +1149,7 @@ void MainWindow::resolveRemoteFile(
         m_db->storeRemoteFileId(groupId, hash, file.id);
         onReady(file.id);
       },
-      onFailed);  // empty → ApiClient falls back to the modal
+      onFailed); // empty → ApiClient falls back to the modal
 }
 
 int MainWindow::activeGroupId() const {
@@ -1154,14 +1189,13 @@ void MainWindow::onAddNote() {
   if (groupId < 0 || m_selectedFilePath.isEmpty())
     return;
 
-  resolveRemoteFile(groupId, m_selectedFilePath,
-                    [this, groupId, body](int remoteFileId) {
-                      m_api->createNote(groupId, remoteFileId, body,
-                                        [this](const ApiNote &) {
-                                          m_noteEdit->clear();
-                                          refreshNotes();
-                                        });
-                    });
+  resolveRemoteFile(
+      groupId, m_selectedFilePath, [this, groupId, body](int remoteFileId) {
+        m_api->createNote(groupId, remoteFileId, body, [this](const ApiNote &) {
+          m_noteEdit->clear();
+          refreshNotes();
+        });
+      });
 }
 
 void MainWindow::refreshNotes() {
@@ -1192,24 +1226,25 @@ void MainWindow::refreshNotes() {
   }
 
   const QString pathAtRequest = m_selectedFilePath;
-  m_api->listNotes(
-      groupId, remoteFileId,
-      [this, pathAtRequest, groupId, remoteFileId](const QList<ApiNote> &notes) {
-        // The user may have clicked elsewhere while this was in flight.
-        if (pathAtRequest != m_selectedFilePath)
-          return;
+  m_api->listNotes(groupId, remoteFileId,
+                   [this, pathAtRequest, groupId,
+                    remoteFileId](const QList<ApiNote> &notes) {
+                     // The user may have clicked elsewhere while this was in
+                     // flight.
+                     if (pathAtRequest != m_selectedFilePath)
+                       return;
 
-        m_notes = notes;
-        while (QLayoutItem *item = m_notesLayout->takeAt(0)) {
-          delete item->widget();
-          delete item;
-        }
+                     m_notes = notes;
+                     while (QLayoutItem *item = m_notesLayout->takeAt(0)) {
+                       delete item->widget();
+                       delete item;
+                     }
 
-        for (const ApiNote &note : m_notes)
-          m_notesLayout->addWidget(buildNoteBubble(note));
+                     for (const ApiNote &note : m_notes)
+                       m_notesLayout->addWidget(buildNoteBubble(note));
 
-        m_notesLayout->addStretch();
-      });
+                     m_notesLayout->addStretch();
+                   });
 }
 
 QWidget *MainWindow::buildNoteBubble(const ApiNote &note) {
@@ -1221,12 +1256,11 @@ QWidget *MainWindow::buildNoteBubble(const ApiNote &note) {
   bl->setSpacing(6);
 
   auto *headerRow = new QHBoxLayout;
-  auto *header = new QLabel(
-      QStringLiteral("%1 · %2").arg(
-          note.authorName,
-          note.createdAt.toLocalTime().toString(
-              QStringLiteral("yyyy-MM-dd hh:mm"))),
-      bubble);
+  auto *header =
+      new QLabel(QStringLiteral("%1 · %2").arg(
+                     note.authorName, note.createdAt.toLocalTime().toString(
+                                          QStringLiteral("yyyy-MM-dd hh:mm"))),
+                 bubble);
   QFont hfont = header->font();
   hfont.setBold(true);
   header->setFont(hfont);
@@ -1261,11 +1295,10 @@ QWidget *MainWindow::buildNoteBubble(const ApiNote &note) {
   bl->addWidget(body);
 
   if (note.version > 1) {
-    auto *edited = new QLabel(
-        QStringLiteral("edited %1")
-            .arg(note.updatedAt.toLocalTime().toString(
-                QStringLiteral("yyyy-MM-dd hh:mm"))),
-        bubble);
+    auto *edited = new QLabel(QStringLiteral("edited %1")
+                                  .arg(note.updatedAt.toLocalTime().toString(
+                                      QStringLiteral("yyyy-MM-dd hh:mm"))),
+                              bubble);
     edited->setStyleSheet(QStringLiteral("color: #6a6d75; font-size: 8pt;"));
     bl->addWidget(edited);
   }
@@ -1418,6 +1451,385 @@ void MainWindow::onLeaveGroup() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Sharing a group by code
+//
+//  A share code is the mirror image of adding a folder. Adding one creates a
+//  group from a directory you already have; redeeming a code creates the
+//  directory from a group someone else already has. Both end with the same
+//  thing: a watched folder mapped to a backend group.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void MainWindow::onCopyShareCode() {
+  const ApiGroup group = activeGroup();
+  if (!group.isShareable())
+    return;
+
+  QGuiApplication::clipboard()->setText(group.shareCode);
+  m_scanLabel->setText(
+      QStringLiteral("✓ Share code for %1 copied").arg(group.name));
+  QTimer::singleShot(4000, m_scanLabel, [this]() { m_scanLabel->clear(); });
+}
+
+void MainWindow::onRotateShareCode() {
+  const ApiGroup group = activeGroup();
+  if (!group.isShareable() || !group.isOwner())
+    return;
+
+  const auto reply = QMessageBox::question(
+      this, QStringLiteral("Replace Share Code"),
+      QStringLiteral("Give '%1' a new share code?\n\nThe current code stops "
+                     "working, so anyone you sent it to and who has not joined "
+                     "yet will need the new one. The %2 member(s) already in "
+                     "the group are unaffected.")
+          .arg(group.name)
+          .arg(group.memberCount),
+      QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+  if (reply != QMessageBox::Yes)
+    return;
+
+  m_api->rotateShareCode(group.id, [this](const ApiGroup &updated) {
+    QGuiApplication::clipboard()->setText(updated.shareCode);
+    reloadGroups([this]() { refreshDetailPane(); });
+    QMessageBox::information(
+        this, QStringLiteral("New Share Code"),
+        QStringLiteral("'%1' now uses:\n\n%2\n\nIt has been copied to your "
+                       "clipboard.")
+            .arg(updated.name, updated.shareCode));
+  });
+}
+
+void MainWindow::onJoinSharedFolder() {
+  if (!m_api->isAuthenticated()) {
+    QMessageBox::information(
+        this, QStringLiteral("Sign In First"),
+        QStringLiteral("Joining a shared folder needs an account, so the group "
+                       "has someone to add. Use File ▸ Sign In."));
+    return;
+  }
+
+  bool ok = false;
+  const QString code = QInputDialog::getText(
+      this, QStringLiteral("Join Shared Folder"),
+      QStringLiteral("Share code:\n\nPaste the code a group member sent you. "
+                     "You'll choose where the folder goes next."),
+      QLineEdit::Normal, QString{}, &ok);
+  if (!ok || code.trimmed().isEmpty())
+    return;
+
+  // The server decides whether this code means anything; nothing local is
+  // touched until it says yes.
+  m_api->joinGroup(
+      code.trimmed(),
+      [this](const ApiGroup &group) {
+        reloadGroups([this, group]() { setUpJoinedFolder(group); });
+      },
+      [this](const ApiError &error) {
+        // A wrong code is a typo, not a fault worth the generic error modal.
+        if (error.code == QLatin1String(ApiError::ShareCodeNotFound)) {
+          QMessageBox::warning(
+              this, QStringLiteral("Unknown Share Code"),
+              QStringLiteral("%1\n\nCodes look like PDFORG-7K2M-9QX4-H3TB.")
+                  .arg(error.message));
+          return;
+        }
+        showError(error);
+      });
+}
+
+void MainWindow::setUpJoinedFolder(const ApiGroup &group) {
+  // Rejoining a group whose folder is still here should not build a second copy
+  // of it somewhere else.
+  const QString existingFolder = m_db->folderForGroup(group.id);
+  if (!existingFolder.isEmpty() && QFileInfo::exists(existingFolder)) {
+    const auto reply = QMessageBox::question(
+        this, QStringLiteral("Already Synced"),
+        QStringLiteral("'%1' is already synced to:\n\n%2\n\nDownload any files "
+                       "you're missing into it?")
+            .arg(group.name, QDir::toNativeSeparators(existingFolder)),
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Yes);
+    if (reply != QMessageBox::Yes)
+      return;
+
+    adoptJoinedFolder(existingFolder, group);
+    return;
+  }
+
+  // Offered next to whatever the user already watches, since that is where they
+  // evidently keep PDFs.
+  QString defaultParent =
+      QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+  const QStringList watched = m_folderModel->allFolders();
+  if (!watched.isEmpty()) {
+    const QString parentOfWatched = QFileInfo(watched.first()).absolutePath();
+    if (QDir(parentOfWatched).exists())
+      defaultParent = parentOfWatched;
+  }
+
+  JoinGroupDialog dialog(group, defaultParent, watched, this);
+  if (dialog.exec() != QDialog::Accepted)
+    return;
+
+  const QString target = dialog.targetPath();
+  if (target.isEmpty())
+    return;
+
+  if (!prepareJoinTarget(target, group))
+    return;
+
+  adoptJoinedFolder(target, group);
+}
+
+bool MainWindow::prepareJoinTarget(const QString &folderPath,
+                                   const ApiGroup &group) {
+  const int existing = JoinGroupDialog::entryCount(folderPath);
+
+  if (existing > 0) {
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(QStringLiteral("Folder Already Exists"));
+    box.setText(QStringLiteral("'%1' already exists and holds %2 item(s).")
+                    .arg(QDir::toNativeSeparators(folderPath))
+                    .arg(existing));
+    box.setInformativeText(QStringLiteral(
+        "Replace it to delete everything in it first and start from the "
+        "group's files alone.\n\nKeep it to leave what's there and download "
+        "only the group's files alongside — the safer choice if you already "
+        "have some of them."));
+    QPushButton *replaceBtn =
+        box.addButton(QStringLiteral("Replace"), QMessageBox::DestructiveRole);
+    QPushButton *keepBtn = box.addButton(QStringLiteral("Keep Existing Files"),
+                                         QMessageBox::AcceptRole);
+    box.addButton(QMessageBox::Cancel);
+    box.setDefaultButton(keepBtn);
+    box.exec();
+
+    if (box.clickedButton() == replaceBtn) {
+      // Deleting someone's files needs a second, unmistakable yes.
+      const auto confirm = QMessageBox::warning(
+          this, QStringLiteral("Delete %1 Item(s)?").arg(existing),
+          QStringLiteral("This permanently deletes everything in:\n\n%1\n\n"
+                         "The %2 file(s) shared with '%3' are then downloaded "
+                         "into the empty folder. This cannot be undone.")
+              .arg(QDir::toNativeSeparators(folderPath))
+              .arg(group.fileCount)
+              .arg(group.name),
+          QMessageBox::Cancel | QMessageBox::Yes, QMessageBox::Cancel);
+      if (confirm != QMessageBox::Yes)
+        return false;
+
+      QDir dir(folderPath);
+      if (!dir.removeRecursively()) {
+        QMessageBox::critical(
+            this, QStringLiteral("Could Not Replace Folder"),
+            QStringLiteral("Some of '%1' could not be deleted, so nothing was "
+                           "downloaded. Check the folder's permissions.")
+                .arg(QDir::toNativeSeparators(folderPath)));
+        return false;
+      }
+    } else if (box.clickedButton() != keepBtn) {
+      return false;
+    }
+  }
+
+  if (!QDir().mkpath(folderPath)) {
+    QMessageBox::critical(
+        this, QStringLiteral("Could Not Create Folder"),
+        QStringLiteral("'%1' could not be created. Check that you can write to "
+                       "the location you chose.")
+            .arg(QDir::toNativeSeparators(folderPath)));
+    return false;
+  }
+  return true;
+}
+
+void MainWindow::adoptJoinedFolder(const QString &folderPath,
+                                   const ApiGroup &group) {
+  // The mapping goes in before the folder is ever watched. A scan calls
+  // syncFolderGroup, which creates a brand-new group for a directory it finds
+  // without one — and the local folder's name has nothing to do with the
+  // group's, so nothing else here could steer it to the group we just joined.
+  m_db->storeFolderGroup(folderPath, group.id, group.name);
+
+  m_api->listFiles(
+      group.id, [this, folderPath, group](const QList<ApiFile> &files) {
+        // Content, not names, decides what is already here: a file kept from a
+        // previous sync may sit under a different name than the group gives it,
+        // and re-downloading it would only produce a numbered duplicate.
+        const QStringList present =
+            QDir(folderPath)
+                .entryList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
+        QSet<QString> localHashes;
+        for (const QString &name : present) {
+          const QString hash =
+              contentHashFor(QDir(folderPath).absoluteFilePath(name));
+          if (!hash.isEmpty())
+            localHashes.insert(hash);
+        }
+
+        QList<ApiFile> pending;
+        for (const ApiFile &file : files) {
+          if (!localHashes.contains(file.contentHash))
+            pending << file;
+        }
+
+        if (pending.isEmpty()) {
+          QMessageBox::information(
+              this, QStringLiteral("Nothing To Download"),
+              QStringLiteral("'%1' is synced to:\n\n%2\n\nYou already have all "
+                             "%3 of its file(s).")
+                  .arg(group.name, QDir::toNativeSeparators(folderPath))
+                  .arg(files.size()));
+          watchJoinedFolder(folderPath);
+          return;
+        }
+
+        auto *progress = new QProgressDialog(
+            QStringLiteral("Downloading files from '%1'…").arg(group.name),
+            QStringLiteral("Cancel"), 0, pending.size(), this);
+        progress->setWindowModality(Qt::WindowModal);
+        progress->setMinimumDuration(0);
+        progress->setValue(0);
+
+        // Existing names are off limits so a download never overwrites a file
+        // that was already there.
+        downloadNext(group.id, folderPath, pending, present, 0, 0, progress);
+      });
+}
+
+void MainWindow::watchJoinedFolder(const QString &folderPath) {
+  // Watching starts a scan, which is what turns the downloaded PDFs into rows
+  // the rest of the app can see — so it happens after the transfer, not before.
+  // Its registration pass costs nothing: downloadNext already cached each
+  // file's hash and backend id.
+  if (m_folderModel->hasFolder(folderPath)) {
+    m_watcher->rescanAll();
+  } else {
+    m_db->saveFolder(folderPath);
+    m_folderModel->addFolder(folderPath); // triggers watcher via signal
+  }
+
+  reloadGroups([this]() {
+    reloadTagVocabulary();
+    refreshDetailPane();
+  });
+}
+
+QString MainWindow::localNameFor(const ApiFile &file,
+                                 const QStringList &taken) {
+  // The display name was typed on someone else's machine, so it is untrusted:
+  // "../../.ssh/authorized_keys" must land as "authorized_keys" inside the
+  // folder, never a directory above it.
+  QString base = file.fileName;
+  base.replace(QLatin1Char('\\'), QLatin1Char('/'));
+  base = base.section(QLatin1Char('/'), -1).trimmed();
+  while (base.startsWith(QLatin1Char('.')))
+    base.remove(0, 1);
+  if (base.isEmpty())
+    base = QStringLiteral("document.pdf");
+
+  if (!taken.contains(base, Qt::CaseInsensitive))
+    return base;
+
+  // Two members can register different PDFs under one display name; both have
+  // to exist locally, so the later one is numbered.
+  const QString stem = QFileInfo(base).completeBaseName();
+  const QString suffix = QFileInfo(base).suffix();
+  for (int n = 2; n < 1000; ++n) {
+    const QString candidate =
+        suffix.isEmpty()
+            ? QStringLiteral("%1 (%2)").arg(stem).arg(n)
+            : QStringLiteral("%1 (%2).%3").arg(stem).arg(n).arg(suffix);
+    if (!taken.contains(candidate, Qt::CaseInsensitive))
+      return candidate;
+  }
+  return base;
+}
+
+void MainWindow::downloadNext(int groupId, const QString &folderPath,
+                              QList<ApiFile> pending, QStringList taken,
+                              int downloaded, int skipped,
+                              QProgressDialog *progress) {
+  const int done = downloaded + skipped;
+
+  if (pending.isEmpty() || progress->wasCanceled()) {
+    const bool canceled = progress->wasCanceled() && !pending.isEmpty();
+    progress->close();
+    progress->deleteLater();
+
+    const ApiGroup group = groupById(groupId);
+    QString message = QStringLiteral("Downloaded %1 file(s) into:\n\n%2")
+                          .arg(downloaded)
+                          .arg(QDir::toNativeSeparators(folderPath));
+    if (skipped > 0) {
+      message += QStringLiteral(
+                     "\n\n%1 file(s) were skipped: they are registered in the "
+                     "group but nobody has uploaded their contents yet. They "
+                     "arrive once a member who holds them runs Sync.")
+                     .arg(skipped);
+    }
+    if (canceled) {
+      message += QStringLiteral("\n\n%1 file(s) were not downloaded.")
+                     .arg(pending.size());
+    }
+
+    QMessageBox::information(this,
+                             canceled ? QStringLiteral("Download Stopped")
+                                      : QStringLiteral("Folder Synced"),
+                             message);
+
+    watchJoinedFolder(folderPath);
+    return;
+  }
+
+  const ApiFile file = pending.takeFirst();
+  progress->setValue(done);
+  progress->setLabelText(QStringLiteral("Downloading %1…").arg(file.fileName));
+
+  // Nothing to fetch: registered in the group, but its bytes were never synced.
+  if (!file.uploaded) {
+    downloadNext(groupId, folderPath, pending, taken, downloaded, skipped + 1,
+                 progress);
+    return;
+  }
+
+  const QString name = localNameFor(file, taken);
+  taken << name;
+  const QString localPath = QDir(folderPath).absoluteFilePath(name);
+
+  m_api->downloadFile(
+      groupId, file.id, localPath,
+      [this, groupId, folderPath, pending, taken, downloaded, skipped, progress,
+       file, localPath]() {
+        // Registering the file again after the scan would mean re-hashing it
+        // and a round trip per file; both are already known, so they are cached
+        // now.
+        const QFileInfo info(localPath);
+        m_db->storeHash(localPath, file.contentHash, info.size(),
+                        info.lastModified());
+        m_db->storeRemoteFileId(groupId, file.contentHash, file.id);
+
+        downloadNext(groupId, folderPath, pending, taken, downloaded + 1,
+                     skipped, progress);
+      },
+      [this, groupId, folderPath, pending, taken, downloaded, skipped, progress,
+       file](const ApiError &error) {
+        // One file the group never uploaded should not end the whole download;
+        // anything else means the next file would fail the same way.
+        if (error.code == QLatin1String(ApiError::NotUploaded)) {
+          downloadNext(groupId, folderPath, pending, taken, downloaded,
+                       skipped + 1, progress);
+          return;
+        }
+        progress->close();
+        progress->deleteLater();
+        showError(error);
+        // Whatever did arrive is real and worth keeping, so the folder is still
+        // adopted — a later Sync picks up the rest.
+        watchJoinedFolder(folderPath);
+      });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Sync
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1427,26 +1839,26 @@ void MainWindow::onSyncGroup() {
   if (!group.isValid())
     return;
 
-  m_api->syncStatus(groupId, [this, groupId,
-                              group](const ApiSyncStatus &status) {
-    if (status.pending.isEmpty()) {
-      QMessageBox::information(
-          this, QStringLiteral("Nothing To Sync"),
-          QStringLiteral("All %1 file(s) in '%2' are already stored.")
-              .arg(status.totalFiles)
-              .arg(group.name));
-      return;
-    }
+  m_api->syncStatus(
+      groupId, [this, groupId, group](const ApiSyncStatus &status) {
+        if (status.pending.isEmpty()) {
+          QMessageBox::information(
+              this, QStringLiteral("Nothing To Sync"),
+              QStringLiteral("All %1 file(s) in '%2' are already stored.")
+                  .arg(status.totalFiles)
+                  .arg(group.name));
+          return;
+        }
 
-    auto *progress = new QProgressDialog(
-        QStringLiteral("Uploading files in '%1'…").arg(group.name),
-        QStringLiteral("Cancel"), 0, status.pending.size(), this);
-    progress->setWindowModality(Qt::WindowModal);
-    progress->setMinimumDuration(0);
-    progress->setValue(0);
+        auto *progress = new QProgressDialog(
+            QStringLiteral("Uploading files in '%1'…").arg(group.name),
+            QStringLiteral("Cancel"), 0, status.pending.size(), this);
+        progress->setWindowModality(Qt::WindowModal);
+        progress->setMinimumDuration(0);
+        progress->setValue(0);
 
-    uploadNext(groupId, status.pending, 0, 0, progress);
-  });
+        uploadNext(groupId, status.pending, 0, 0, progress);
+      });
 }
 
 void MainWindow::uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
@@ -1606,13 +2018,24 @@ QWidget *MainWindow::buildDetailPane() {
   m_groupMeta->setStyleSheet(QStringLiteral("color: #8a8d95; font-size: 8pt;"));
   root->addWidget(m_groupMeta);
 
+  // The code that lets someone else join this group. Shown rather than hidden
+  // behind a dialog, because handing it to a teammate is the whole workflow.
+  m_shareCodeLabel = new QLabel(pane);
+  m_shareCodeLabel->setWordWrap(true);
+  m_shareCodeLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  m_shareCodeLabel->setStyleSheet(
+      QStringLiteral("font-family: monospace; font-size: 9pt;"));
+  root->addWidget(m_shareCodeLabel);
+
   auto *groupRow = new QHBoxLayout;
   m_renameGroupBtn = new QPushButton(QStringLiteral("Rename"), pane);
   m_leaveGroupBtn = new QPushButton(QStringLiteral("Leave"), pane);
   m_syncBtn = new QPushButton(QStringLiteral("Sync"), pane);
+  m_shareBtn = new QPushButton(QStringLiteral("Copy Code"), pane);
   groupRow->addWidget(m_renameGroupBtn);
   groupRow->addWidget(m_leaveGroupBtn);
   groupRow->addWidget(m_syncBtn);
+  groupRow->addWidget(m_shareBtn);
   groupRow->addStretch();
   root->addLayout(groupRow);
 
@@ -1663,6 +2086,20 @@ QWidget *MainWindow::buildDetailPane() {
   connect(m_leaveGroupBtn, &QPushButton::clicked, this,
           &MainWindow::onLeaveGroup);
   connect(m_syncBtn, &QPushButton::clicked, this, &MainWindow::onSyncGroup);
+  connect(m_shareBtn, &QPushButton::clicked, this,
+          &MainWindow::onCopyShareCode);
+
+  // Rotating a code is rare and irreversible for anyone still holding the old
+  // one, so it sits one level down rather than next to the everyday Copy.
+  m_rotateCodeAction = new QAction(QStringLiteral("Replace Share Code…"), this);
+  connect(m_rotateCodeAction, &QAction::triggered, this,
+          &MainWindow::onRotateShareCode);
+  for (QWidget *host : {static_cast<QWidget *>(m_shareBtn),
+                        static_cast<QWidget *>(m_shareCodeLabel)}) {
+    host->addAction(m_rotateCodeAction);
+    host->setContextMenuPolicy(Qt::ActionsContextMenu);
+  }
+
   connect(m_addNoteBtn, &QPushButton::clicked, this, &MainWindow::onAddNote);
   connect(m_inviteBtn, &QPushButton::clicked, this,
           &MainWindow::onInviteMember);
@@ -1720,6 +2157,24 @@ void MainWindow::refreshDetailPane() {
               : QString{});
   m_syncBtn->setEnabled(hasGroup);
 
+  // Any member may pass the code on — it is how the group grows, and the owner
+  // has no way to hand it out privately anyway once someone has joined.
+  const bool shareable = group.isShareable();
+  m_shareBtn->setEnabled(shareable);
+  m_shareBtn->setToolTip(
+      shareable ? QStringLiteral("Copy '%1's share code — anyone with it can "
+                                 "join and sync this folder")
+                      .arg(group.name)
+                : QStringLiteral("Only a shared group has a code"));
+  m_rotateCodeAction->setEnabled(shareable && isOwner);
+  m_shareCodeLabel->setText(
+      shareable ? QStringLiteral("Share code: %1").arg(group.shareCode)
+                : QString{});
+  m_shareCodeLabel->setToolTip(
+      shareable ? QStringLiteral("Anyone who has this code can join the group. "
+                                 "Right-click to replace it.")
+                : QString{});
+
   m_inviteEdit->setEnabled(isOwner && !group.isPersonal);
   m_inviteBtn->setEnabled(isOwner && !group.isPersonal);
   m_inviteEdit->setPlaceholderText(
@@ -1732,9 +2187,9 @@ void MainWindow::refreshDetailPane() {
   m_noteEdit->setEnabled(canWriteNotes);
   m_addNoteBtn->setEnabled(canWriteNotes);
   m_noteEdit->setPlaceholderText(
-      canWriteNotes
-          ? QStringLiteral("Add a note visible to '%1'…").arg(activeGroup().name)
-          : QStringLiteral("Add a note…"));
+      canWriteNotes ? QStringLiteral("Add a note visible to '%1'…")
+                          .arg(activeGroup().name)
+                    : QStringLiteral("Add a note…"));
 
   refreshNotes();
 }
@@ -1756,8 +2211,8 @@ void MainWindow::refreshGroupHeader() {
 
   if (!online) {
     m_groupHeader->setText(QStringLiteral("—"));
-    m_groupMeta->setText(QStringLiteral(
-        "Sign in to share a folder's PDFs with a group."));
+    m_groupMeta->setText(
+        QStringLiteral("Sign in to share a folder's PDFs with a group."));
     m_groupLabel->setText(QStringLiteral("—"));
     return;
   }
@@ -1784,11 +2239,11 @@ void MainWindow::refreshGroupHeader() {
     return;
   }
 
-  m_groupHeader->setText(
-      QStringLiteral("%1  ·  %2")
-          .arg(breakableText(group.name),
-               group.isOwner() ? QStringLiteral("you created it")
-                               : QStringLiteral("you're a member")));
+  m_groupHeader->setText(QStringLiteral("%1  ·  %2")
+                             .arg(breakableText(group.name),
+                                  group.isOwner()
+                                      ? QStringLiteral("you created it")
+                                      : QStringLiteral("you're a member")));
   m_groupHeader->setToolTip(group.name);
   // Subdirectories are groups of their own, so say what this count covers.
   m_groupMeta->setText(
@@ -1820,26 +2275,26 @@ void MainWindow::refreshMembers() {
   }
 
   const int groupIdAtRequest = group.id;
-  m_api->listMembers(
-      groupIdAtRequest, [this, groupIdAtRequest](const QList<ApiMember> &members) {
-        // The user may have selected a file in another folder meanwhile.
-        if (groupIdAtRequest != activeGroupId())
-          return;
+  m_api->listMembers(groupIdAtRequest, [this, groupIdAtRequest](
+                                           const QList<ApiMember> &members) {
+    // The user may have selected a file in another folder meanwhile.
+    if (groupIdAtRequest != activeGroupId())
+      return;
 
-        m_members = members;
-        while (QLayoutItem *item = m_membersLayout->takeAt(0)) {
-          delete item->widget();
-          delete item;
-        }
+    m_members = members;
+    while (QLayoutItem *item = m_membersLayout->takeAt(0)) {
+      delete item->widget();
+      delete item;
+    }
 
-        const ApiGroup current = activeGroup();
-        m_membersTitle->setText(
-            QStringLiteral("MEMBERS (%1)").arg(m_members.size()));
-        for (const ApiMember &member : m_members)
-          m_membersLayout->addWidget(buildMemberRow(member, current));
+    const ApiGroup current = activeGroup();
+    m_membersTitle->setText(
+        QStringLiteral("MEMBERS (%1)").arg(m_members.size()));
+    for (const ApiMember &member : m_members)
+      m_membersLayout->addWidget(buildMemberRow(member, current));
 
-        m_membersLayout->addStretch();
-      });
+    m_membersLayout->addStretch();
+  });
 }
 
 QWidget *MainWindow::buildMemberRow(const ApiMember &member,
@@ -1851,18 +2306,18 @@ QWidget *MainWindow::buildMemberRow(const ApiMember &member,
 
   auto *who = new QLabel(
       QStringLiteral("%1  <%2>").arg(member.displayName, member.email), row);
-  who->setToolTip(QStringLiteral("Joined %1").arg(
-      member.joinedAt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd"))));
+  who->setToolTip(QStringLiteral("Joined %1")
+                      .arg(member.joinedAt.toLocalTime().toString(
+                          QStringLiteral("yyyy-MM-dd"))));
   rl->addWidget(who);
   rl->addStretch();
 
   auto *role = new QLabel(member.isOwner() ? QStringLiteral("creator")
                                            : QStringLiteral("member"),
                           row);
-  role->setStyleSheet(
-      member.isOwner()
-          ? QStringLiteral("color: #9fb3ff; font-size: 8pt;")
-          : QStringLiteral("color: #6a6d75; font-size: 8pt;"));
+  role->setStyleSheet(member.isOwner()
+                          ? QStringLiteral("color: #9fb3ff; font-size: 8pt;")
+                          : QStringLiteral("color: #6a6d75; font-size: 8pt;"));
   rl->addWidget(role);
 
   // Only the creator removes people, and never themselves — the backend

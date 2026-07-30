@@ -67,6 +67,15 @@ class GroupOut(BaseModel):
     my_role: str
     member_count: int
     file_count: int
+    # The string to hand a teammate so they can join. ``None`` for a personal
+    # group, which nobody else may join.
+    share_code: str | None = None
+
+
+class GroupJoin(BaseModel):
+    """Redeem a share code. Any hyphenation and casing is accepted."""
+
+    share_code: str = Field(min_length=1, max_length=64)
 
 
 class MemberOut(BaseModel):

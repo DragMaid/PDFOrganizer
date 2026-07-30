@@ -70,6 +70,13 @@ class RecentView;
  *
  * Whoever added the folder owns its groups and is the only one who may invite
  * or remove members; everyone else sees the roster and may leave.
+ *
+ * Joining runs that backwards
+ * ───────────────────────────
+ * Every shareable group carries a **share code**. Redeeming one (File ▸ Join
+ * Shared Folder…) grants membership, then creates a local folder for the group,
+ * downloads its PDFs into it, and starts watching it — arriving at exactly the
+ * state the creator's own machine is in, from the opposite direction.
  */
 class MainWindow : public QMainWindow
 {
@@ -108,6 +115,14 @@ private slots:
     void onInviteMember();
     void onLeaveGroup();
     void onSyncGroup();
+
+    // ── Sharing a group by code ───────────────────────────────────────────────
+    /// Put the active group's share code on the clipboard, ready to send.
+    void onCopyShareCode();
+    /// Owner-only. Issues a new code so the old one stops working.
+    void onRotateShareCode();
+    /// Redeem someone else's code, then mirror that group into a local folder.
+    void onJoinSharedFolder();
 
     // ── Notes ─────────────────────────────────────────────────────────────────
     void onAddNote();
@@ -215,6 +230,37 @@ private:
     void uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
                     int skipped, class QProgressDialog* progress);
 
+    // ── Joining a shared group ────────────────────────────────────────────────
+
+    /// Ask where @p group should live locally, prepare the folder, and pull its
+    /// files down. Called once the share code has already been redeemed.
+    void setUpJoinedFolder(const ApiGroup& group);
+
+    /// Make @p folderPath ready to receive a joined group's files, asking about
+    /// anything already in it. False means the user backed out or it failed.
+    bool prepareJoinTarget(const QString& folderPath, const ApiGroup& group);
+
+    /// Attach @p folderPath to @p group and pull its files down. The mapping is
+    /// stored first, so the scan that watching later triggers adopts the joined
+    /// group instead of creating a second one named after the new folder.
+    void adoptJoinedFolder(const QString& folderPath, const ApiGroup& group);
+
+    /// Start watching a folder whose download has finished, which is what makes
+    /// its PDFs visible in the rest of the UI.
+    void watchJoinedFolder(const QString& folderPath);
+
+    /// Download the group's files into @p folderPath, one at a time.
+    void downloadNext(int groupId, const QString& folderPath,
+                      QList<ApiFile> pending, QStringList taken, int downloaded,
+                      int skipped, class QProgressDialog* progress);
+
+    /// A local file name for @p file that is safe to create inside
+    /// @p folderPath: the display name stripped of any directory part, made
+    /// unique against @p taken. Names come from another member's machine, so
+    /// they are treated as untrusted input.
+    [[nodiscard]] static QString localNameFor(const ApiFile& file,
+                                              const QStringList& taken);
+
     void restoreLayout();
     void saveLayout();
     QString dataDir() const;
@@ -256,6 +302,8 @@ private:
     QPushButton*     m_renameGroupBtn = nullptr;
     QPushButton*     m_leaveGroupBtn  = nullptr;
     QPushButton*     m_syncBtn     = nullptr;
+    QPushButton*     m_shareBtn    = nullptr;
+    QLabel*          m_shareCodeLabel = nullptr;
     QString          m_selectedFilePath;
 
     // ── Toolbar widgets ───────────────────────────────────────────────────────
@@ -265,6 +313,8 @@ private:
     QAction*         m_gridAction  = nullptr;
     QAction*         m_signInAction  = nullptr;
     QAction*         m_signOutAction = nullptr;
+    QAction*         m_joinFolderAction = nullptr;
+    QAction*         m_rotateCodeAction = nullptr;
 
     // ── Status bar ────────────────────────────────────────────────────────────
     QLabel*          m_statusLabel = nullptr;

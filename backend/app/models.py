@@ -12,10 +12,15 @@ Identity and scoping rules that the rest of the backend depends on:
 * **Tags and notes are group-scoped.** A file may live in several groups; a
   note written in one group must not leak into another, so both carry an
   explicit ``group_id`` rather than hanging off the file alone.
+* A group's ``share_code`` is a **bearer credential**: whoever holds it can join
+  the group. It is therefore random and opaque, never the sequential ``id``,
+  which anyone could count up through.
 """
 
 from __future__ import annotations
 
+import re
+import secrets
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -38,9 +43,47 @@ from .db import Base
 ROLE_OWNER = "owner"
 ROLE_MEMBER = "member"
 
+# Crockford-style alphabet: no I, L, O, U, 0 or 1, so a code read aloud or
+# copied by hand cannot turn into a different valid code.
+SHARE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
+SHARE_BODY_LEN = 12
+SHARE_PREFIX = "PDFORG"
+
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def new_share_code() -> str:
+    """A fresh join code, e.g. ``PDFORG-7K2M-9QX4-H3TB``.
+
+    12 symbols out of a 30-symbol alphabet is ~59 bits — enough that guessing a
+    live code is not a realistic attack, which matters because holding the code
+    is by itself sufficient to join.
+    """
+    body = "".join(secrets.choice(SHARE_ALPHABET) for _ in range(SHARE_BODY_LEN))
+    return format_share_code(body)
+
+
+def format_share_code(body: str) -> str:
+    groups = [body[i : i + 4] for i in range(0, len(body), 4)]
+    return "-".join([SHARE_PREFIX, *groups])
+
+
+def normalize_share_code(raw: str) -> str | None:
+    """Canonicalise whatever the user pasted, or return ``None`` if it can't be.
+
+    Accepts the code with or without the prefix, in any case, and with any
+    spacing or hyphenation — people retype these from chat messages.
+    """
+    body = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
+    if body.startswith(SHARE_PREFIX):
+        body = body[len(SHARE_PREFIX) :]
+    if len(body) != SHARE_BODY_LEN:
+        return None
+    if any(char not in SHARE_ALPHABET for char in body):
+        return None
+    return format_share_code(body)
 
 
 class User(Base):
@@ -70,6 +113,12 @@ class Group(Base):
     # Auto-created at signup. Guarantees every registered file has a permission
     # context even before the user shares anything.
     is_personal: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Handing this string to someone is what lets them join. Personal groups
+    # carry one only because the column is not nullable — joining one is refused,
+    # and the API never hands it out.
+    share_code: Mapped[str] = mapped_column(
+        String(32), unique=True, nullable=False, default=new_share_code
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

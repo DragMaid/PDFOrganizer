@@ -86,9 +86,10 @@ public:
                                      int remoteFileId);
     bool           forgetRemoteFile (int groupId, const QString& contentHash);
     /// Drop every cached backend id — used when signing out or changing server.
-    /// This includes the folder → group mapping, because a different server
-    /// (or account) numbers its groups differently; MainWindow re-attaches each
-    /// directory to its group by name after the next sign-in.
+    /// This includes the folder → group *ids*, because a different server (or
+    /// account) numbers its groups differently. The remembered group *names* are
+    /// kept, and MainWindow re-attaches each directory by name on the next
+    /// sign-in.
     bool           clearRemoteCache();
 
     // ── Folder → group mapping ────────────────────────────────────────────────
@@ -98,7 +99,13 @@ public:
 
     /// Backend group id for a directory, or -1 if it has none yet.
     int            folderGroupId  (const QString& folderPath) const;
-    bool           storeFolderGroup(const QString& folderPath, int groupId);
+    /// The group's name is stored too, and unlike the id it survives a sign-out
+    /// (see clearRemoteCache) — it is how a directory is matched back to its
+    /// group on the next sign-in.
+    bool           storeFolderGroup(const QString& folderPath, int groupId,
+                                    const QString& groupName);
+    /// Name of the group this directory last belonged to, or an empty string.
+    QString        folderGroupName(const QString& folderPath) const;
     bool           forgetFolderGroup(const QString& folderPath);
     /// The directory that maps to @p groupId, or an empty string.
     QString        folderForGroup (int groupId) const;

@@ -110,6 +110,7 @@ ApiGroup ApiGroup::fromJson(const QJsonObject& obj)
     group.memberCount = obj.value(QStringLiteral("member_count")).toInt();
     group.fileCount   = obj.value(QStringLiteral("file_count")).toInt();
     group.createdAt   = parseTimestamp(obj.value(QStringLiteral("created_at")));
+    group.shareCode   = obj.value(QStringLiteral("share_code")).toString();
     return group;
 }
 

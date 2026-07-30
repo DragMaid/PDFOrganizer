@@ -25,6 +25,17 @@ os.environ.setdefault(
 )
 os.environ.setdefault("PDFORG_JWT_SECRET", "test-secret-not-for-production")
 
+# Blanked unconditionally, not with setdefault: a developer's .env holds real
+# Backblaze credentials, and a test run must never reach the live bucket. Tests
+# that need a working upload or download monkeypatch the storage object instead.
+for _b2_var in (
+    "PDFORG_B2_KEY_ID",
+    "PDFORG_B2_APPLICATION_KEY",
+    "PDFORG_B2_BUCKET_ID",
+    "PDFORG_B2_BUCKET_NAME",
+):
+    os.environ[_b2_var] = ""
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.db import Base, engine  # noqa: E402

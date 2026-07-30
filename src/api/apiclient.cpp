@@ -10,6 +10,8 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSaveFile>
+#include <memory>
 
 namespace {
 
@@ -330,6 +332,30 @@ void ApiClient::deleteGroup(int groupId, VoidHandler onOk, ErrorHandler onError)
          [onOk](const QJsonDocument&) {
              if (onOk)
                  onOk();
+         },
+         std::move(onError));
+}
+
+void ApiClient::joinGroup(const QString& shareCode, Handler<ApiGroup> onOk,
+                          ErrorHandler onError)
+{
+    send("POST", QStringLiteral("/groups/join"),
+         QJsonObject{{QStringLiteral("share_code"), shareCode}}, true,
+         [onOk](const QJsonDocument& doc) {
+             if (onOk)
+                 onOk(ApiGroup::fromJson(objectFrom(doc)));
+         },
+         std::move(onError));
+}
+
+void ApiClient::rotateShareCode(int groupId, Handler<ApiGroup> onOk,
+                                ErrorHandler onError)
+{
+    send("POST", QStringLiteral("/groups/%1/share-code/rotate").arg(groupId), {},
+         false,
+         [onOk](const QJsonDocument& doc) {
+             if (onOk)
+                 onOk(ApiGroup::fromJson(objectFrom(doc)));
          },
          std::move(onError));
 }
@@ -675,6 +701,128 @@ void ApiClient::uploadFile(int groupId, int fileId, const QString& localPath,
                     onOk(ApiUploadResult::fromJson(
                         objectFrom(QJsonDocument::fromJson(payload))));
                 }
+            });
+}
+
+void ApiClient::downloadFile(int groupId, int fileId, const QString& localPath,
+                             VoidHandler onOk, ErrorHandler onError)
+{
+    if (!hasBaseUrl()) {
+        report(onError,
+               ApiError::network(QStringLiteral(
+                   "No server address is configured. Set one in Settings.")));
+        return;
+    }
+
+    dispatchDownload(
+        QStringLiteral("/groups/%1/files/%2/content").arg(groupId).arg(fileId),
+        localPath, std::move(onOk), std::move(onError), /*mayRetry=*/true);
+}
+
+void ApiClient::dispatchDownload(const QString& path, const QString& localPath,
+                                 VoidHandler onOk, ErrorHandler onError,
+                                 bool mayRetry)
+{
+    // QSaveFile writes to a sibling temporary and renames on commit(), so a
+    // failed or cancelled transfer leaves no partial PDF for the folder scanner
+    // to pick up and register as a real file.
+    auto* target = new QSaveFile(localPath);
+    if (!target->open(QIODevice::WriteOnly)) {
+        const QString reason = target->errorString();
+        delete target;
+        report(onError,
+               ApiError::network(QStringLiteral("Could not write %1.\n\n%2")
+                                     .arg(localPath, reason)));
+        return;
+    }
+
+    QNetworkRequest request(resolve(path));
+    request.setRawHeader("Accept", "application/pdf");
+    if (!m_accessToken.isEmpty())
+        request.setRawHeader("Authorization", "Bearer " + m_accessToken.toUtf8());
+    // Like uploads, a download of a real PDF can legitimately run long.
+    request.setTransferTimeout(0);
+
+    QNetworkReply* reply = m_nam.get(request);
+    target->setParent(reply);
+
+    // An error reply is JSON, not PDF bytes, so it is collected here instead of
+    // being written to the file.
+    auto errorBody = std::make_shared<QByteArray>();
+
+    connect(reply, &QNetworkReply::readyRead, this,
+            [reply, target, errorBody]() {
+                const int status =
+                    reply->attribute(QNetworkRequest::HttpStatusCodeAttribute)
+                        .toInt();
+                if (status >= 400)
+                    errorBody->append(reply->readAll());
+                else
+                    target->write(reply->readAll());
+            });
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, target, errorBody, path, localPath, onOk, onError,
+             mayRetry]() {
+                reply->deleteLater();
+
+                const int status =
+                    reply->attribute(QNetworkRequest::HttpStatusCodeAttribute)
+                        .toInt();
+
+                if (status == 0) {
+                    target->cancelWriting();
+                    report(onError,
+                           ApiError::network(QStringLiteral("Download failed.\n\n%1")
+                                                 .arg(reply->errorString())));
+                    return;
+                }
+
+                if (status == 401 && mayRetry && !m_refreshToken.isEmpty()
+                    && !m_refreshing) {
+                    target->cancelWriting();
+                    refreshSession(
+                        [this, path, localPath, onOk, onError]() {
+                            dispatchDownload(path, localPath, onOk, onError,
+                                             /*mayRetry=*/false);
+                        },
+                        [this, onError](const ApiError&) {
+                            clearSession();
+                            emit sessionExpired();
+                            ApiError expired;
+                            expired.httpStatus = 401;
+                            expired.code =
+                                QString::fromLatin1(ApiError::Unauthorized);
+                            expired.message = QStringLiteral(
+                                "Your session has expired. Sign in again.");
+                            report(onError, expired);
+                        });
+                    return;
+                }
+
+                if (status >= 400) {
+                    target->cancelWriting();
+                    errorBody->append(reply->readAll());
+                    ApiError error = ApiError::fromJson(
+                        status,
+                        objectFrom(QJsonDocument::fromJson(*errorBody)));
+                    if (status == 401) {
+                        clearSession();
+                        emit sessionExpired();
+                    }
+                    report(onError, error);
+                    return;
+                }
+
+                target->write(reply->readAll());
+                if (!target->commit()) {
+                    report(onError,
+                           ApiError::network(QStringLiteral("Could not save %1.")
+                                                 .arg(localPath)));
+                    return;
+                }
+                if (onOk)
+                    onOk();
             });
 }
 

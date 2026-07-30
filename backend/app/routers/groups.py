@@ -1,7 +1,11 @@
 """Groups and membership.
 
-Owner-only: rename, delete, add member, remove member.
+Owner-only: rename, delete, add member, remove member, rotate the share code.
 Any member: read the group, and everything under files/tags/notes.
+
+There are two ways into a group. The owner can add someone by email, or anyone
+can redeem the group's **share code** — an opaque random string that is itself
+the authorisation, so it is only ever handed out to people who already belong.
 """
 
 from __future__ import annotations
@@ -20,8 +24,17 @@ from ..models import (
     GroupFile,
     GroupMember,
     User,
+    new_share_code,
+    normalize_share_code,
 )
-from ..schemas import GroupCreate, GroupOut, GroupUpdate, MemberAdd, MemberOut
+from ..schemas import (
+    GroupCreate,
+    GroupJoin,
+    GroupOut,
+    GroupUpdate,
+    MemberAdd,
+    MemberOut,
+)
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -46,6 +59,9 @@ def _to_out(db: Session, group: Group, role: str) -> GroupOut:
         my_role=role,
         member_count=member_count,
         file_count=file_count,
+        # Withheld for a personal group: it cannot be joined, so a code on
+        # screen would only invite someone to try.
+        share_code=None if group.is_personal else group.share_code,
     )
 
 
@@ -71,10 +87,70 @@ def create_group(payload: GroupCreate, user: CurrentUser, db: DbSession) -> Grou
     return _to_out(db, group, ROLE_OWNER)
 
 
+@router.post("/join", response_model=GroupOut)
+def join_group(payload: GroupJoin, user: CurrentUser, db: DbSession) -> GroupOut:
+    """Redeem a share code and become a member.
+
+    Idempotent on purpose: someone who already belongs gets the group back
+    unchanged rather than an error, so re-running the join to recreate a local
+    folder they deleted just works.
+    """
+    code = normalize_share_code(payload.share_code)
+    if code is None:
+        raise bad_request(
+            "That does not look like a share code. They look like "
+            "PDFORG-7K2M-9QX4-H3TB."
+        )
+
+    group = db.execute(
+        select(Group).where(Group.share_code == code)
+    ).scalar_one_or_none()
+    if group is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND,
+            "share_code_not_found",
+            "No group uses that share code. Check it with whoever sent it — it "
+            "may have been replaced since.",
+        )
+    if group.is_personal:
+        raise forbidden("That group is private and cannot be joined.")
+
+    existing = db.get(GroupMember, {"group_id": group.id, "user_id": user.id})
+    if existing is not None:
+        return _to_out(db, group, existing.role)
+
+    db.execute(
+        pg_insert(GroupMember)
+        .values(group_id=group.id, user_id=user.id, role=ROLE_MEMBER)
+        .on_conflict_do_nothing(index_elements=["group_id", "user_id"])
+    )
+    db.commit()
+
+    member = db.get(GroupMember, {"group_id": group.id, "user_id": user.id})
+    assert member is not None
+    return _to_out(db, group, member.role)
+
+
 @router.get("/{group_id}", response_model=GroupOut)
 def get_group(group_id: int, user: CurrentUser, db: DbSession) -> GroupOut:
     group, member = group_or_404(db, group_id, user)
     return _to_out(db, group, member.role)
+
+
+@router.post("/{group_id}/share-code/rotate", response_model=GroupOut)
+def rotate_share_code(group_id: int, user: CurrentUser, db: DbSession) -> GroupOut:
+    """Invalidate the old code. Members already in the group keep their access."""
+    ownership_or_403(db, group_id, user)
+    group = db.get(Group, group_id)
+    if group is None:
+        raise not_found("That group")
+    if group.is_personal:
+        raise bad_request("Your personal group has no share code.")
+
+    group.share_code = new_share_code()
+    db.commit()
+    db.refresh(group)
+    return _to_out(db, group, ROLE_OWNER)
 
 
 @router.patch("/{group_id}", response_model=GroupOut)

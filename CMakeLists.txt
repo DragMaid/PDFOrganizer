@@ -41,6 +41,7 @@ set(SOURCES
     src/views/tagmanagerdialog.cpp
     src/views/settingsdialog.cpp
     src/views/logindialog.cpp
+    src/views/joingroupdialog.cpp
 
     src/delegates/listdelegate.cpp
     src/delegates/griddelegate.cpp
@@ -71,6 +72,7 @@ set(HEADERS
     src/views/tagmanagerdialog.h
     src/views/settingsdialog.h
     src/views/logindialog.h
+    src/views/joingroupdialog.h
     src/delegates/listdelegate.h
     src/delegates/griddelegate.h
     src/utils/pdfopener.h

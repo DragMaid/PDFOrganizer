@@ -1,7 +1,9 @@
-"""Backblaze B2 uploads.
+"""Backblaze B2 uploads and downloads.
 
 Credentials come from the environment and never leave this process — clients
-POST bytes to us and we do the B2 conversation on their behalf.
+POST bytes to us and we do the B2 conversation on their behalf. Downloads work
+the same way round: the server fetches the blob and streams it back, so a client
+never holds a B2 token or a public object URL.
 
 Only the single-shot upload path is implemented; anything above
 ``max_upload_bytes`` is rejected with a clear message rather than silently
@@ -31,6 +33,7 @@ _AUTH_TTL = timedelta(hours=12)
 @dataclass
 class _Auth:
     api_url: str
+    download_url: str
     authorization_token: str
     obtained_at: datetime
 
@@ -71,11 +74,13 @@ class B2Storage:
         body = response.json()
         storage = body.get("apiInfo", {}).get("storageApi", {})
         api_url = storage.get("apiUrl") or body.get("apiUrl")
-        if not api_url:
+        download_url = storage.get("downloadUrl") or body.get("downloadUrl")
+        if not api_url or not download_url:
             raise B2Error("Backblaze returned an unexpected authorization response.")
 
         return _Auth(
             api_url=api_url,
+            download_url=download_url,
             authorization_token=body["authorizationToken"],
             obtained_at=datetime.now(timezone.utc),
         )
@@ -164,6 +169,55 @@ class B2Storage:
             return str(response.json()["fileId"])
 
         raise B2Error("Backblaze kept rejecting the upload session. Try again.")
+
+    # ── Download ──────────────────────────────────────────────────────────────
+
+    def download(self, b2_file_id: str) -> bytes:
+        """Fetch a stored blob by its B2 file id.
+
+        By id rather than by name so a blob stays reachable even if the object
+        naming scheme changes later; the id is what the ``files`` row records.
+        """
+        settings = get_settings()
+        if not settings.b2_configured:
+            raise ApiError(
+                503,
+                "storage_unconfigured",
+                "File storage is not configured on the server. Ask an "
+                "administrator to set the PDFORG_B2_* environment variables.",
+            )
+
+        # As with uploads, a 401 here means the account token aged out rather
+        # than that anything is wrong with the request.
+        for attempt in range(2):
+            auth = self._current_auth(force=attempt > 0)
+            try:
+                response = httpx.get(
+                    f"{auth.download_url}/b2api/v3/b2_download_file_by_id",
+                    params={"fileId": b2_file_id},
+                    headers={"Authorization": auth.authorization_token},
+                    timeout=300.0,
+                )
+            except httpx.HTTPError as exc:
+                raise B2Error(f"Download from Backblaze failed: {exc}") from exc
+
+            if response.status_code == 401 and attempt == 0:
+                log.warning("B2 download token expired; re-authorizing")
+                continue
+            if response.status_code == 404:
+                raise ApiError(
+                    502,
+                    "storage_missing",
+                    "The stored copy of that file is gone from Backblaze. "
+                    "Someone who still holds it locally needs to sync it again.",
+                )
+            if response.status_code != 200:
+                raise B2Error(
+                    f"Backblaze refused the download ({response.status_code})."
+                )
+            return response.content
+
+        raise B2Error("Backblaze kept rejecting the download. Try again.")
 
 
 class _Unauthorized(Exception):

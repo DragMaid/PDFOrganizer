@@ -41,6 +41,10 @@ struct ApiError
     static constexpr auto OwnerLocked        = "owner_locked";
     static constexpr auto StorageUnconfigured = "storage_unconfigured";
     static constexpr auto NetworkFailure     = "network_failure";
+    static constexpr auto ShareCodeNotFound  = "share_code_not_found";
+    /// The file is registered in the group but its bytes were never uploaded,
+    /// so there is nothing to download yet.
+    static constexpr auto NotUploaded        = "not_uploaded";
 
     [[nodiscard]] bool isNetworkFailure() const { return httpStatus == 0; }
     [[nodiscard]] bool isAuthFailure()    const { return httpStatus == 401; }
@@ -76,9 +80,16 @@ struct ApiGroup
     int       memberCount = 0;
     int       fileCount = 0;
     QDateTime createdAt;
+    /// The string to hand someone so they can join this group — holding it is
+    /// itself the permission, so treat it like a password. Empty for a personal
+    /// group, which nobody else may join.
+    QString   shareCode;
 
     [[nodiscard]] bool isValid() const { return id >= 0; }
     [[nodiscard]] bool isOwner() const { return myRole == QLatin1String("owner"); }
+    [[nodiscard]] bool isShareable() const {
+        return isValid() && !isPersonal && !shareCode.isEmpty();
+    }
     static ApiGroup fromJson(const QJsonObject& obj);
 };
 

@@ -77,6 +77,20 @@ public:
                        ErrorHandler onError = {});
     void deleteGroup  (int groupId, VoidHandler onOk, ErrorHandler onError = {});
 
+    /// Redeem a share code and become a member of the group behind it. The code
+    /// alone is the authorization — no invitation is needed — so a successful
+    /// call means the caller now has access. Accepts the code in any casing or
+    /// hyphenation; the server canonicalises it.
+    ///
+    /// Idempotent: redeeming a code for a group you already belong to succeeds
+    /// and returns the group unchanged, which is what makes re-syncing a folder
+    /// you deleted locally work.
+    void joinGroup    (const QString& shareCode, Handler<ApiGroup> onOk,
+                       ErrorHandler onError = {});
+    /// Owner-only. Invalidates the old code; existing members keep their access.
+    void rotateShareCode(int groupId, Handler<ApiGroup> onOk,
+                         ErrorHandler onError = {});
+
     void listMembers  (int groupId, Handler<QList<ApiMember>> onOk,
                        ErrorHandler onError = {});
     void addMember    (int groupId, const QString& email, Handler<ApiMember> onOk,
@@ -136,6 +150,15 @@ public:
     /// client never sees a B2 credential.
     void uploadFile (int groupId, int fileId, const QString& localPath,
                      Handler<ApiUploadResult> onOk, ErrorHandler onError = {});
+    /// The reverse of uploadFile: fetch a group file's bytes and write them to
+    /// `localPath`. Nothing is left behind on failure — the bytes land in a
+    /// temporary file and are moved into place only once the whole transfer has
+    /// arrived, so a half-written PDF never appears on disk.
+    ///
+    /// Fails with ApiError::NotUploaded when the file is registered in the group
+    /// but nobody has synced its contents yet.
+    void downloadFile(int groupId, int fileId, const QString& localPath,
+                      VoidHandler onOk, ErrorHandler onError = {});
 
     /// SHA-256 of a file's contents — the identity the backend keys files by.
     /// Returns an empty string if the file cannot be read.
@@ -157,6 +180,12 @@ private:
               const QJsonObject& body, bool hasBody,
               RawHandler onOk, ErrorHandler onError, bool mayRetry = true);
     void dispatch(const PendingRequest& request);
+    /// Binary GET straight to disk. Separate from dispatch() because the reply
+    /// is streamed to a file rather than parsed as JSON, but it carries the same
+    /// refresh-once-on-401 behaviour: a folder of PDFs can take longer to fetch
+    /// than an access token lives.
+    void dispatchDownload(const QString& path, const QString& localPath,
+                          VoidHandler onOk, ErrorHandler onError, bool mayRetry);
     void finish(QNetworkReply* reply, const PendingRequest& request);
     void retryAfterRefresh(const PendingRequest& request);
 

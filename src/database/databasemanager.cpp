@@ -131,10 +131,17 @@ bool DatabaseManager::createSchema()
         // Which backend group holds the PDFs of a directory. One row per
         // directory that holds a PDF directly — subdirectories get their own
         // rows and their own groups — created the first time one is scanned.
+        //
+        // group_name is remembered alongside the id because the id is only
+        // meaningful to one server: signing out sets group_id to -1 but keeps
+        // the name, which is how a directory finds its way back to the same
+        // group afterwards. It is the only route back for a folder that was
+        // joined by share code, whose local name says nothing about the group's.
         QStringLiteral(R"(
             CREATE TABLE IF NOT EXISTS folder_groups (
                 folder_path TEXT    PRIMARY KEY,
-                group_id    INTEGER NOT NULL
+                group_id    INTEGER NOT NULL,
+                group_name  TEXT
             )
         )"),
 
@@ -147,6 +154,17 @@ bool DatabaseManager::createSchema()
         if (!q.exec(stmt)) {
             qWarning() << "Schema DDL failed:" << q.lastError().text();
             return false;
+        }
+    }
+
+    // folder_groups.group_name arrived after the table did, so an install from
+    // before it needs the column added rather than the table created.
+    if (!m_db.record(QStringLiteral("folder_groups")).contains(
+            QStringLiteral("group_name"))) {
+        if (!q.exec(QStringLiteral(
+                "ALTER TABLE folder_groups ADD COLUMN group_name TEXT"))) {
+            qWarning() << "Could not add folder_groups.group_name:"
+                       << q.lastError().text();
         }
     }
 
@@ -465,9 +483,17 @@ bool DatabaseManager::forgetRemoteFile(int groupId, const QString& contentHash)
 bool DatabaseManager::clearRemoteCache()
 {
     QSqlQuery q(m_db);
-    const bool files   = q.exec(QStringLiteral("DELETE FROM remote_files"));
-    const bool folders = q.exec(QStringLiteral("DELETE FROM folder_groups"));
-    return files && folders;
+    const bool files = q.exec(QStringLiteral("DELETE FROM remote_files"));
+
+    // The ids go, the names stay. A different server (or account) numbers its
+    // groups differently, so every id here is now meaningless — but the name is
+    // what MainWindow re-attaches each directory by after the next sign-in, and
+    // a folder joined by share code has no other way back to its group.
+    const bool orphans = q.exec(QStringLiteral(
+        "DELETE FROM folder_groups WHERE group_name IS NULL"));
+    const bool folders = q.exec(QStringLiteral(
+        "UPDATE folder_groups SET group_id = -1"));
+    return files && orphans && folders;
 }
 
 // ── Folder → group mapping ────────────────────────────────────────────────────
@@ -485,16 +511,33 @@ int DatabaseManager::folderGroupId(const QString& folderPath) const
     return -1;
 }
 
-bool DatabaseManager::storeFolderGroup(const QString& folderPath, int groupId)
+bool DatabaseManager::storeFolderGroup(const QString& folderPath, int groupId,
+                                      const QString& groupName)
 {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(R"(
-        INSERT INTO folder_groups (folder_path, group_id) VALUES (:p, :g)
-        ON CONFLICT(folder_path) DO UPDATE SET group_id = excluded.group_id
+        INSERT INTO folder_groups (folder_path, group_id, group_name)
+        VALUES (:p, :g, :n)
+        ON CONFLICT(folder_path) DO UPDATE SET group_id   = excluded.group_id,
+                                               group_name = excluded.group_name
     )"));
     q.bindValue(QStringLiteral(":p"), folderPath);
     q.bindValue(QStringLiteral(":g"), groupId);
+    q.bindValue(QStringLiteral(":n"), groupName);
     return q.exec();
+}
+
+QString DatabaseManager::folderGroupName(const QString& folderPath) const
+{
+    if (folderPath.isEmpty()) return {};
+
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "SELECT group_name FROM folder_groups WHERE folder_path = :p"));
+    q.bindValue(QStringLiteral(":p"), folderPath);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return {};
 }
 
 bool DatabaseManager::forgetFolderGroup(const QString& folderPath)
@@ -518,6 +561,10 @@ QStringList DatabaseManager::mappedFolders() const
 
 QString DatabaseManager::folderForGroup(int groupId) const
 {
+    // -1 is the "no group known yet" marker clearRemoteCache leaves behind, and
+    // several folders can carry it at once — it identifies nothing.
+    if (groupId < 0) return {};
+
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(
         "SELECT folder_path FROM folder_groups WHERE group_id = :g"));

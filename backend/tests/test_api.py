@@ -163,6 +163,124 @@ def test_personal_group_is_protected(alice):
     )
 
 
+# ── Share codes and joining ───────────────────────────────────────────────────
+
+
+def test_a_new_group_gets_a_share_code_and_a_personal_one_does_not(alice):
+    personal = alice.get("/groups").json()[0]
+    assert personal["is_personal"] is True
+    assert personal["share_code"] is None
+
+    group_id = shared_group(alice)
+    code = alice.get(f"/groups/{group_id}").json()["share_code"]
+    assert code.startswith("PDFORG-")
+    assert len(code) == len("PDFORG-XXXX-XXXX-XXXX")
+
+
+def test_two_groups_never_share_a_code(alice):
+    first = alice.post("/groups", json={"name": "One"}).json()["share_code"]
+    second = alice.post("/groups", json={"name": "Two"}).json()["share_code"]
+    assert first != second
+
+
+def test_redeeming_a_code_grants_membership_and_access(alice, bob):
+    group_id = shared_group(alice)
+    register_file(alice, group_id, HASH_A, "a.pdf")
+    code = alice.get(f"/groups/{group_id}").json()["share_code"]
+
+    # Bob was never invited; the code alone is the authorization.
+    assert bob.get(f"/groups/{group_id}").status_code == 404
+
+    joined = bob.post("/groups/join", json={"share_code": code})
+    assert joined.status_code == 200, joined.text
+    body = joined.json()
+    assert body["id"] == group_id
+    assert body["name"] == "Research"
+    assert body["my_role"] == "member"
+    assert body["file_count"] == 1
+
+    listed = bob.get(f"/groups/{group_id}/files").json()
+    assert [f["file_name"] for f in listed] == ["a.pdf"]
+
+
+def test_a_code_is_accepted_however_it_was_retyped(alice, bob):
+    group_id = shared_group(alice)
+    code = alice.get(f"/groups/{group_id}").json()["share_code"]
+    body = code.removeprefix("PDFORG-").replace("-", "")
+
+    # Lower-cased, unprefixed, spaced instead of hyphenated — all the shapes a
+    # code arrives in after a trip through a chat window.
+    for variant in (code.lower(), body, f"{body[:4]} {body[4:8]} {body[8:]}"):
+        response = bob.post("/groups/join", json={"share_code": variant})
+        assert response.status_code == 200, f"{variant}: {response.text}"
+        assert response.json()["id"] == group_id
+
+
+def test_joining_a_group_you_are_already_in_changes_nothing(alice, bob):
+    group_id = shared_group(alice, bob)
+    code = alice.get(f"/groups/{group_id}").json()["share_code"]
+
+    again = bob.post("/groups/join", json={"share_code": code})
+    assert again.status_code == 200
+    assert again.json()["member_count"] == 2
+
+    # And the owner redeeming their own code stays the owner.
+    mine = alice.post("/groups/join", json={"share_code": code})
+    assert mine.json()["my_role"] == "owner"
+    assert mine.json()["member_count"] == 2
+
+
+def test_a_malformed_code_is_told_apart_from_an_unknown_one(bob):
+    malformed = bob.post("/groups/join", json={"share_code": "not-a-code"})
+    assert malformed.status_code == 400
+    assert "PDFORG-" in malformed.json()["message"]
+
+    # Well-formed but nobody's: only the alphabet and length are checked locally.
+    unknown = bob.post("/groups/join", json={"share_code": "PDFORG-2345-6789-ABCD"})
+    assert unknown.status_code == 404
+    assert unknown.json()["code"] == "share_code_not_found"
+
+
+def test_a_personal_group_cannot_be_joined_even_with_its_code(alice, bob):
+    from app.db import SessionLocal
+    from app.models import Group
+
+    personal_id = alice.get("/groups").json()[0]["id"]
+    with SessionLocal() as db:
+        code = db.get(Group, personal_id).share_code
+
+    response = bob.post("/groups/join", json={"share_code": code})
+    assert response.status_code == 403
+    assert bob.get(f"/groups/{personal_id}").status_code == 404
+
+
+def test_rotating_a_code_locks_out_the_old_one_but_keeps_members(alice, bob, carol):
+    group_id = shared_group(alice, bob)
+    old_code = alice.get(f"/groups/{group_id}").json()["share_code"]
+
+    rotated = alice.post(f"/groups/{group_id}/share-code/rotate")
+    assert rotated.status_code == 200
+    new_code = rotated.json()["share_code"]
+    assert new_code != old_code
+
+    assert carol.post("/groups/join", json={"share_code": old_code}).status_code == 404
+    assert carol.post("/groups/join", json={"share_code": new_code}).status_code == 200
+    # Bob joined before the rotation and is unaffected by it.
+    assert bob.get(f"/groups/{group_id}").status_code == 200
+
+
+def test_only_the_owner_can_rotate_a_code(alice, bob):
+    group_id = shared_group(alice, bob)
+    assert bob.post(f"/groups/{group_id}/share-code/rotate").status_code == 403
+
+
+def test_a_non_member_cannot_rotate_or_read_a_code(alice, bob):
+    group_id = shared_group(alice)
+    # Same 404 as any other probe of a group you are not in.
+    assert bob.post(f"/groups/{group_id}/share-code/rotate").status_code == 404
+    assert bob.get(f"/groups/{group_id}").status_code == 404
+
+
 # ── Files ─────────────────────────────────────────────────────────────────────
 
 
@@ -430,6 +548,108 @@ def test_upload_reports_missing_storage_configuration_clearly(alice):
         files={"content": ("a.pdf", b"pdf-a", "application/pdf")},
     )
     # No PDFORG_B2_* set in the test environment, so this is the honest answer.
+    assert response.status_code == 503
+    assert response.json()["code"] == "storage_unconfigured"
+
+
+def test_a_file_whose_bytes_were_never_uploaded_cannot_be_downloaded(alice):
+    group_id = shared_group(alice)
+    file = register_file(alice, group_id, HASH_A, "a.pdf")
+
+    response = alice.get(f"/groups/{group_id}/files/{file['id']}/content")
+    assert response.status_code == 409
+    assert response.json()["code"] == "not_uploaded"
+    assert "a.pdf" in response.json()["message"]
+
+
+def test_downloading_returns_the_stored_bytes_to_a_member(alice, bob, monkeypatch):
+    from app import storage as storage_module
+
+    monkeypatch.setattr(
+        storage_module.storage, "upload", lambda content, name: "b2-file-id"
+    )
+    monkeypatch.setattr(
+        storage_module.storage, "download", lambda file_id: b"pdf-a"
+    )
+
+    group_id = shared_group(alice)
+    file = register_file(alice, group_id, HASH_A, "a.pdf")
+    uploaded = alice.post(
+        f"/groups/{group_id}/files/{file['id']}/upload",
+        files={"content": ("a.pdf", b"pdf-a", "application/pdf")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+
+    # The whole point of the share-code flow: Bob holds no copy of this PDF and
+    # gets the real bytes from the server.
+    code = alice.get(f"/groups/{group_id}").json()["share_code"]
+    assert bob.post("/groups/join", json={"share_code": code}).status_code == 200
+
+    response = bob.get(f"/groups/{group_id}/files/{file['id']}/content")
+    assert response.status_code == 200, response.text
+    assert response.content == b"pdf-a"
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["x-content-sha256"] == HASH_A
+    assert "a.pdf" in response.headers["content-disposition"]
+
+
+def test_a_non_member_cannot_download(alice, bob, monkeypatch):
+    from app import storage as storage_module
+
+    monkeypatch.setattr(
+        storage_module.storage, "upload", lambda content, name: "b2-file-id"
+    )
+    monkeypatch.setattr(
+        storage_module.storage, "download", lambda file_id: b"pdf-a"
+    )
+
+    group_id = shared_group(alice)
+    file = register_file(alice, group_id, HASH_A, "a.pdf")
+    alice.post(
+        f"/groups/{group_id}/files/{file['id']}/upload",
+        files={"content": ("a.pdf", b"pdf-a", "application/pdf")},
+    )
+
+    assert bob.get(f"/groups/{group_id}/files/{file['id']}/content").status_code == 404
+
+
+def test_a_blob_that_does_not_match_its_checksum_is_refused(alice, monkeypatch):
+    from app import storage as storage_module
+
+    monkeypatch.setattr(
+        storage_module.storage, "upload", lambda content, name: "b2-file-id"
+    )
+    group_id = shared_group(alice)
+    file = register_file(alice, group_id, HASH_A, "a.pdf")
+    alice.post(
+        f"/groups/{group_id}/files/{file['id']}/upload",
+        files={"content": ("a.pdf", b"pdf-a", "application/pdf")},
+    )
+
+    # Storage hands back something other than what was stored under this hash.
+    monkeypatch.setattr(
+        storage_module.storage, "download", lambda file_id: b"tampered"
+    )
+    response = alice.get(f"/groups/{group_id}/files/{file['id']}/content")
+    assert response.status_code == 502
+    assert response.json()["code"] == "storage_corrupt"
+
+
+def test_download_reports_missing_storage_configuration_clearly(alice, monkeypatch):
+    from app import storage as storage_module
+
+    monkeypatch.setattr(
+        storage_module.storage, "upload", lambda content, name: "b2-file-id"
+    )
+    group_id = shared_group(alice)
+    file = register_file(alice, group_id, HASH_A, "a.pdf")
+    alice.post(
+        f"/groups/{group_id}/files/{file['id']}/upload",
+        files={"content": ("a.pdf", b"pdf-a", "application/pdf")},
+    )
+
+    # Real storage, no PDFORG_B2_* in the environment.
+    response = alice.get(f"/groups/{group_id}/files/{file['id']}/content")
     assert response.status_code == 503
     assert response.json()["code"] == "storage_unconfigured"
 

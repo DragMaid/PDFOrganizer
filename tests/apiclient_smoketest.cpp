@@ -13,6 +13,7 @@
 #include "api/apiclient.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QEventLoop>
 #include <QFile>
 #include <QTemporaryDir>
@@ -365,12 +366,16 @@ int main(int argc, char** argv)
         });
     });
 
+    // Whether the bytes actually reached storage decides how much of the
+    // download half below can be exercised.
+    bool blobStored = false;
     await("upload reports storage state honestly", [&](auto done) {
         alice.uploadFile(
             groupId, fileId, pdfPath,
             [&, done](const ApiUploadResult& result) {
                 check(result.uploaded || result.alreadyPresent,
                       "upload succeeded (B2 is configured)");
+                blobStored = true;
                 done();
             },
             [&, done](const ApiError& e) {
@@ -379,6 +384,228 @@ int main(int argc, char** argv)
                       "clear 'storage not configured' error, not a crash");
                 done();
             });
+    });
+
+    // ── Share codes: joining a group and pulling its folder down ──────────────
+    out << Qt::endl << "share codes" << Qt::endl;
+
+    ApiClient carol;
+    ApiClient dave;
+    carol.setBaseUrl(QUrl(baseUrl));
+    dave.setBaseUrl(QUrl(baseUrl));
+    const QString carolEmail = QStringLiteral("carol-%1@example.com").arg(stamp);
+    const QString daveEmail  = QStringLiteral("dave-%1@example.com").arg(stamp);
+
+    QObject::connect(&carol, &ApiClient::errorOccurred, [](const ApiError& e) {
+        out << "  !! carol unhandled: " << e.code << " — " << e.message
+            << Qt::endl;
+        ++g_failures;
+    });
+    QObject::connect(&dave, &ApiClient::errorOccurred, [](const ApiError& e) {
+        out << "  !! dave unhandled: " << e.code << " — " << e.message << Qt::endl;
+        ++g_failures;
+    });
+
+    await("carol registers", [&](auto done) {
+        carol.registerAccount(carolEmail, QStringLiteral("hunter2hunter2"),
+                              QStringLiteral("Carol"),
+                              [&, done](const ApiUser&) { done(); });
+    });
+    await("dave registers", [&](auto done) {
+        dave.registerAccount(daveEmail, QStringLiteral("hunter2hunter2"),
+                             QStringLiteral("Dave"),
+                             [&, done](const ApiUser&) { done(); });
+    });
+
+    int sharedId = -1;
+    QString shareCode;
+    await("a new group carries a share code", [&](auto done) {
+        alice.createGroup(QStringLiteral("Shared By Code"),
+                          [&, done](const ApiGroup& group) {
+                              check(group.isShareable(), "group is shareable");
+                              check(group.shareCode.startsWith(
+                                        QLatin1String("PDFORG-")),
+                                    "code carries the expected prefix");
+                              sharedId  = group.id;
+                              shareCode = group.shareCode;
+                              done();
+                          });
+    });
+
+    await("the personal group has no share code", [&](auto done) {
+        alice.listGroups([&, done](const QList<ApiGroup>& groups) {
+            for (const ApiGroup& group : groups) {
+                if (group.isPersonal) {
+                    check(group.shareCode.isEmpty(),
+                          "a personal group's code is withheld");
+                    check(!group.isShareable(), "and it is not shareable");
+                }
+            }
+            done();
+        });
+    });
+
+    await("the group is invisible before the code is used", [&](auto done) {
+        carol.listFiles(
+            sharedId,
+            [&, done](const QList<ApiFile>&) {
+                check(false, "a non-member must not read the group");
+                done();
+            },
+            [&, done](const ApiError& e) {
+                check(e.httpStatus == 404, "non-member gets 404");
+                done();
+            });
+    });
+
+    await("a malformed code is refused", [&](auto done) {
+        carol.joinGroup(
+            QStringLiteral("nonsense"),
+            [&, done](const ApiGroup&) {
+                check(false, "garbage should not join anything");
+                done();
+            },
+            [&, done](const ApiError& e) {
+                check(e.httpStatus == 400, "malformed code is a 400");
+                done();
+            });
+    });
+
+    await("a well-formed but unknown code is refused", [&](auto done) {
+        carol.joinGroup(
+            QStringLiteral("PDFORG-2345-6789-ABCD"),
+            [&, done](const ApiGroup&) {
+                check(false, "an unknown code should not join anything");
+                done();
+            },
+            [&, done](const ApiError& e) {
+                check(e.code == QLatin1String(ApiError::ShareCodeNotFound),
+                      "unknown code reports share_code_not_found");
+                done();
+            });
+    });
+
+    await("carol joins with the code", [&](auto done) {
+        carol.joinGroup(shareCode, [&, done](const ApiGroup& group) {
+            check(group.id == sharedId, "joined the right group");
+            check(!group.isOwner(), "joins as a member, not an owner");
+            check(group.name == QLatin1String("Shared By Code"),
+                  "the group's name comes back to name the local folder");
+            done();
+        });
+    });
+
+    await("the code survives being retyped", [&](auto done) {
+        // Lower-cased and unhyphenated, as it arrives out of a chat window.
+        QString mangled = shareCode.toLower();
+        mangled.remove(QLatin1Char('-'));
+        carol.joinGroup(mangled, [&, done](const ApiGroup& group) {
+            check(group.id == sharedId, "same group, however the code was typed");
+            check(group.memberCount == 2, "rejoining did not duplicate anyone");
+            done();
+        });
+    });
+
+    // The blob is keyed by content, so registering the same PDF in a second
+    // group finds it already stored — nothing to upload before downloading.
+    int sharedFileId = -1;
+    await("the same content in a new group reuses the stored blob", [&](auto done) {
+        alice.registerFile(sharedId, hash, QStringLiteral("paper.pdf"), 42, 3,
+                           [&, done](const ApiFile& file) {
+                               check(file.isValid(), "file registered");
+                               check(file.uploaded == blobStored,
+                                     "storage state carried over by content hash");
+                               sharedFileId = file.id;
+                               done();
+                           });
+    });
+
+    const QString downloadPath = tmp.filePath(QStringLiteral("downloaded.pdf"));
+    if (blobStored) {
+        await("carol downloads bytes she never had", [&](auto done) {
+            carol.downloadFile(sharedId, sharedFileId, downloadPath,
+                               [&, done]() {
+                                   check(QFile::exists(downloadPath),
+                                         "the file landed on disk");
+                                   check(ApiClient::hashFile(downloadPath) == hash,
+                                         "downloaded bytes match the original");
+                                   done();
+                               });
+        });
+    } else {
+        out << "  skip  download (B2 not configured on this server)" << Qt::endl;
+    }
+
+    await("a non-member cannot download", [&](auto done) {
+        dave.downloadFile(
+            sharedId, sharedFileId, tmp.filePath(QStringLiteral("nope.pdf")),
+            [&, done]() {
+                check(false, "a non-member must not get the bytes");
+                done();
+            },
+            [&, done](const ApiError& e) {
+                check(e.httpStatus == 404, "non-member download is a 404");
+                check(!QFile::exists(tmp.filePath(QStringLiteral("nope.pdf"))),
+                      "and nothing was written to disk");
+                done();
+            });
+    });
+
+    await("an unsynced file reports itself rather than failing opaquely",
+          [&](auto done) {
+              const QString otherHash = QCryptographicHash::hash(
+                                            QByteArrayLiteral("never uploaded"),
+                                            QCryptographicHash::Sha256)
+                                            .toHex();
+              alice.registerFile(
+                  sharedId, QString::fromLatin1(otherHash.toLatin1()),
+                  QStringLiteral("missing.pdf"), 9, 1,
+                  [&, done](const ApiFile& file) {
+                      carol.downloadFile(
+                          sharedId, file.id,
+                          tmp.filePath(QStringLiteral("missing.pdf")),
+                          [&, done]() {
+                              check(false, "there are no bytes to download");
+                              done();
+                          },
+                          [&, done](const ApiError& e) {
+                              check(e.code == QLatin1String(ApiError::NotUploaded),
+                                    "reports not_uploaded, so the client can skip it");
+                              done();
+                          });
+                  });
+          });
+
+    await("a member cannot rotate the code", [&](auto done) {
+        carol.rotateShareCode(
+            sharedId,
+            [&, done](const ApiGroup&) {
+                check(false, "only the owner may rotate");
+                done();
+            },
+            [&, done](const ApiError& e) {
+                check(e.httpStatus == 403, "member rotate is 403");
+                done();
+            });
+    });
+
+    await("rotating locks out the old code", [&](auto done) {
+        alice.rotateShareCode(sharedId, [&, done](const ApiGroup& updated) {
+            check(updated.shareCode != shareCode, "the code changed");
+            check(updated.isShareable(), "and the group is still shareable");
+
+            dave.joinGroup(
+                shareCode,
+                [&, done](const ApiGroup&) {
+                    check(false, "the retired code must not work");
+                    done();
+                },
+                [&, done](const ApiError& e) {
+                    check(e.code == QLatin1String(ApiError::ShareCodeNotFound),
+                          "the retired code is no longer recognised");
+                    done();
+                });
+        });
     });
 
     // ── Access revocation ─────────────────────────────────────────────────────
