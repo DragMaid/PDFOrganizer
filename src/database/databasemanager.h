@@ -23,6 +23,8 @@
  *                                              on every sync
  *   remote_files (group_id, content_hash, remote_file_id)
  *                                            – local path → backend file id
+ *   folder_groups(folder_path, group_id)     – directory → the backend group
+ *                                              holding the PDFs directly in it
  *
  * All public methods are synchronous and should be called from the main thread.
  * Heavy scanning work is done in FolderWatcher on a worker thread; only the
@@ -84,7 +86,24 @@ public:
                                      int remoteFileId);
     bool           forgetRemoteFile (int groupId, const QString& contentHash);
     /// Drop every cached backend id — used when signing out or changing server.
+    /// This includes the folder → group mapping, because a different server
+    /// (or account) numbers its groups differently; MainWindow re-attaches each
+    /// directory to its group by name after the next sign-in.
     bool           clearRemoteCache();
+
+    // ── Folder → group mapping ────────────────────────────────────────────────
+    // A directory *is* a group: the PDFs sitting directly in it are tracked in
+    // that group, and there is no other way to put a file in one. A
+    // subdirectory is a separate row, because it is a separate group.
+
+    /// Backend group id for a directory, or -1 if it has none yet.
+    int            folderGroupId  (const QString& folderPath) const;
+    bool           storeFolderGroup(const QString& folderPath, int groupId);
+    bool           forgetFolderGroup(const QString& folderPath);
+    /// The directory that maps to @p groupId, or an empty string.
+    QString        folderForGroup (int groupId) const;
+    /// Every directory that currently has a group, deepest paths last.
+    QStringList    mappedFolders  () const;
 
 private:
     bool createSchema();

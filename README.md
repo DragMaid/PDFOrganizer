@@ -10,6 +10,7 @@ PDF files — built with **C++17** and **Qt 6** (Widgets).
 | Feature | Details |
 |---|---|
 | **Folder management** | Add/remove root folders; recursive auto-scan; drag & drop folders onto the panel |
+| **Directory = group** | Every directory holding a PDF becomes a group of its own (`Papers`, `Papers/2023`); the PDFs sitting in it are tracked automatically |
 | **Live file watching** | `QFileSystemWatcher` detects new / deleted PDFs without manual refresh |
 | **External PDF viewer** | Opens with Okular (Linux) or the OS default (Windows / macOS fallback) |
 | **Tagging** | Group-scoped tags, created/renamed/deleted on the backend; concurrent adds never conflict |
@@ -17,7 +18,7 @@ PDF files — built with **C++17** and **Qt 6** (Widgets).
 | **Grid / card view** | Thumbnail cards with tag pills; async thumbnail generation |
 | **Search** | Live filter by filename and/or tag text |
 | **Tag filter** | One-click chips in the left panel (AND semantics) |
-| **Groups** | Share files, tags and notes with named groups; owner invites and removes members by email |
+| **Groups** | One per directory; its creator invites and removes members by email, everyone else sees the roster |
 | **File notes** | Threaded notes per file, per group; only the author can edit or delete their own |
 | **Group sync** | Uploads a group's PDFs to Backblaze B2 *through the backend* — no storage credentials on the client |
 | **Accounts** | Email + password sign-in against the FastAPI backend; session survives restarts |
@@ -51,23 +52,67 @@ Local SQLite keeps what is genuinely per-machine (watched folders, scan
 results, thumbnails, preferences) plus two caches: file content hashes, and the
 backend ids those hashes map to.
 
-### Groups are the permission context
+### A directory *is* a group
+
+Every directory that **directly** holds a PDF becomes its own group, named after
+its path below the watched root. It holds exactly the PDFs sitting in it — the
+ones a level down belong to that level's own group. There is no other way to put
+a file in one: **a file's group is decided by which directory it sits in**, not
+by a checkbox.
+
+```
+Add /home/me/Papers
+├── thesis.pdf             →  group "Papers"
+├── 2023/tax.pdf           →  group "Papers/2023"
+├── 2023/vat.pdf           →  group "Papers/2023"
+└── 2023/receipts/a.pdf    →  group "Papers/2023/receipts"
+```
+
+Three directories, three separate groups, each with its own members. A directory
+that holds no PDF of its own — only subdirectories that do — gets no group; it
+is a container, not a sharing unit. Scanning is still recursive, so subfolders
+are picked up and turned into groups without being added by hand.
 
 Files are identified by the **SHA-256 of their contents**, not their path, so
 two people holding the same PDF in different directories share its tags and
 notes automatically, and a given PDF is uploaded to B2 exactly once.
 
-The toolbar's **Group** selector decides where shared work lands: a tag joins
-that group's vocabulary, a note is visible to exactly that group's members.
-Every account gets a private *Personal* group at signup, so this is never
-empty.
+The **active group** shown in the toolbar is therefore derived rather than
+chosen: it is the group of the directory the selected file sits in, and it
+decides where shared work lands — a tag joins that group's vocabulary, a note is
+visible to exactly that group's members. With no file selected there is no
+active group, and the shared controls are inert.
 
 | Action | Who may do it |
 |---|---|
 | Read files, tags and notes | Any member of the group |
 | Add files, add/remove tags, write notes | Any member |
-| **Edit or delete a note** | **Only its author** — the group owner is not exempt |
-| Rename or delete the group, invite/remove members | The owner |
+| **Edit or delete a note** | **Only its author** — the group's creator is not exempt |
+| Rename the group, invite/remove members | **Only its creator** — whoever added the folder |
+| Leave the group | Any member, of themselves |
+
+The detail pane lists the group's members inline — name, email and whether they
+created it. Invite and remove controls are drawn only for the creator; everyone
+else sees the same roster read-only plus a **Leave** button. The backend applies
+the same rules whatever the client draws.
+
+Two housekeeping details follow from tying groups to directories:
+
+- **Names are disambiguated.** A subfolder carries its path below the root, so
+  `2023` under two different roots reads as `Papers/2023` and `Invoices/2023`.
+  Two watched roots sharing a basename (`Work/Papers`, `Home/Papers`) become
+  `Papers (Work)` and `Papers (Home)`, and their subfolder groups inherit that,
+  so the toolbar is never ambiguous.
+- **Removing a folder keeps its groups by default.** Un-watching a root is a
+  local act, and it now spans several groups — its own directory plus every
+  subdirectory that held a PDF. The confirmation says how many, and offers to
+  delete the ones you created and leave the ones you joined; that box starts
+  unticked so other members' notes are never destroyed by accident.
+
+Signing out clears the local id caches, including the directory → group mapping.
+On the next sign-in each directory re-attaches to the group of the same name you
+already own before creating a new one, so a round trip through the login sheet
+does not duplicate anything.
 
 ### How conflicts are handled
 
@@ -314,6 +359,15 @@ CREATE TABLE remote_files (
     content_hash   TEXT    NOT NULL,
     remote_file_id INTEGER NOT NULL,
     PRIMARY KEY (group_id, content_hash)
+);
+
+-- Which backend group holds a directory's PDFs. One row per directory that
+-- holds a PDF directly — subdirectories get their own rows and their own
+-- groups. Cleared on sign-out along with the ids above, then re-attached by
+-- group name on the way back in.
+CREATE TABLE folder_groups (
+    folder_path TEXT    PRIMARY KEY,
+    group_id    INTEGER NOT NULL
 );
 ```
 

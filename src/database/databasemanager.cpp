@@ -128,6 +128,16 @@ bool DatabaseManager::createSchema()
             )
         )"),
 
+        // Which backend group holds the PDFs of a directory. One row per
+        // directory that holds a PDF directly — subdirectories get their own
+        // rows and their own groups — created the first time one is scanned.
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS folder_groups (
+                folder_path TEXT    PRIMARY KEY,
+                group_id    INTEGER NOT NULL
+            )
+        )"),
+
         // Performance indexes
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_folder ON pdf_files(folder_path)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_opened ON pdf_files(last_opened)"),
@@ -455,7 +465,66 @@ bool DatabaseManager::forgetRemoteFile(int groupId, const QString& contentHash)
 bool DatabaseManager::clearRemoteCache()
 {
     QSqlQuery q(m_db);
-    return q.exec(QStringLiteral("DELETE FROM remote_files"));
+    const bool files   = q.exec(QStringLiteral("DELETE FROM remote_files"));
+    const bool folders = q.exec(QStringLiteral("DELETE FROM folder_groups"));
+    return files && folders;
+}
+
+// ── Folder → group mapping ────────────────────────────────────────────────────
+
+int DatabaseManager::folderGroupId(const QString& folderPath) const
+{
+    if (folderPath.isEmpty()) return -1;
+
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "SELECT group_id FROM folder_groups WHERE folder_path = :p"));
+    q.bindValue(QStringLiteral(":p"), folderPath);
+    if (q.exec() && q.next())
+        return q.value(0).toInt();
+    return -1;
+}
+
+bool DatabaseManager::storeFolderGroup(const QString& folderPath, int groupId)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        INSERT INTO folder_groups (folder_path, group_id) VALUES (:p, :g)
+        ON CONFLICT(folder_path) DO UPDATE SET group_id = excluded.group_id
+    )"));
+    q.bindValue(QStringLiteral(":p"), folderPath);
+    q.bindValue(QStringLiteral(":g"), groupId);
+    return q.exec();
+}
+
+bool DatabaseManager::forgetFolderGroup(const QString& folderPath)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "DELETE FROM folder_groups WHERE folder_path = :p"));
+    q.bindValue(QStringLiteral(":p"), folderPath);
+    return q.exec();
+}
+
+QStringList DatabaseManager::mappedFolders() const
+{
+    QStringList result;
+    QSqlQuery q(QStringLiteral(
+        "SELECT folder_path FROM folder_groups ORDER BY folder_path"), m_db);
+    while (q.next())
+        result << q.value(0).toString();
+    return result;
+}
+
+QString DatabaseManager::folderForGroup(int groupId) const
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "SELECT folder_path FROM folder_groups WHERE group_id = :g"));
+    q.bindValue(QStringLiteral(":g"), groupId);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return {};
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

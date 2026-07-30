@@ -33,8 +33,8 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCloseEvent>
-#include <QComboBox>
 #include <QDebug>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -182,16 +182,16 @@ void MainWindow::initToolBar() {
   tb->addSeparator();
 
   // ── Active group ──────────────────────────────────────────────────────────
-  // The permission context for everything shared: tags land in this group's
-  // vocabulary and notes are visible to exactly this group's members.
+  // Derived, not chosen: the group of the directory the selected file sits in.
+  // It is the permission context for everything shared — tags land in its
+  // vocabulary, notes are visible to exactly its members.
   tb->addWidget(new QLabel(QStringLiteral(" Group: "), this));
-  m_groupCombo = new QComboBox(this);
-  m_groupCombo->setMinimumWidth(160);
-  m_groupCombo->setToolTip(
-      QStringLiteral("Tags and notes you add apply to this group"));
-  tb->addWidget(m_groupCombo);
-  connect(m_groupCombo, &QComboBox::currentIndexChanged, this,
-          &MainWindow::onActiveGroupChanged);
+  m_groupLabel = new QLabel(QStringLiteral("—"), this);
+  m_groupLabel->setMinimumWidth(160);
+  m_groupLabel->setToolTip(QStringLiteral(
+      "The group of the selected file's folder. Tags and notes you add apply "
+      "to it."));
+  tb->addWidget(m_groupLabel);
 
   tb->addSeparator();
 
@@ -429,18 +429,85 @@ void MainWindow::onAddFolderRequested() {
 
   m_db->saveFolder(dir);
   m_folderModel->addFolder(dir); // triggers watcher via signal
+
+  // The group is created once the scan confirms there is at least one PDF —
+  // see onScanFinished. Nothing to do here but say so.
+  if (m_api->isAuthenticated()) {
+    m_scanLabel->setText(QStringLiteral("Scanning %1…")
+                             .arg(groupNameForFolder(dir)));
+  }
 }
 
 void MainWindow::onRemoveFolderRequested(const QString &path) {
-  const auto reply = QMessageBox::question(
-      this, QStringLiteral("Remove Folder"),
-      QStringLiteral(
-          "Stop watching '%1'?\n\nPDF records in this folder will be removed.")
-          .arg(path),
-      QMessageBox::Yes | QMessageBox::Cancel);
+  // One watched root now spans many groups — its own directory plus every
+  // subdirectory that held a PDF — so all of them are in scope here.
+  QStringList affected;
+  QList<int> owned;
+  QList<int> joined;
+  for (const QString &folder : m_db->mappedFolders()) {
+    if (folder != path && !folder.startsWith(path + QDir::separator()))
+      continue;
+    affected << folder;
+    const ApiGroup group = groupById(m_db->folderGroupId(folder));
+    if (!group.isValid() || group.isPersonal)
+      continue;
+    (group.isOwner() ? owned : joined) << group.id;
+  }
 
-  if (reply != QMessageBox::Yes)
+  QDialog dlg(this);
+  dlg.setWindowTitle(QStringLiteral("Remove Folder"));
+  dlg.setMinimumWidth(440);
+  auto *layout = new QVBoxLayout(&dlg);
+
+  auto *question = new QLabel(
+      QStringLiteral("Stop watching '%1'?\n\nPDF records for this folder and "
+                     "its subfolders are removed from this machine. The files "
+                     "on disk are untouched.")
+          .arg(path),
+      &dlg);
+  question->setWordWrap(true);
+  layout->addWidget(question);
+
+  // Removing the folder locally says nothing about the shared groups, so the
+  // destructive half is opt-in and off by default.
+  QCheckBox *alsoDrop = nullptr;
+  if (!owned.isEmpty() || !joined.isEmpty()) {
+    alsoDrop = new QCheckBox(&dlg);
+    alsoDrop->setChecked(false);
+    if (joined.isEmpty()) {
+      alsoDrop->setText(QStringLiteral("Also delete the %1 shared group(s) "
+                                       "this folder created — removes their "
+                                       "tags and notes for every member")
+                            .arg(owned.size()));
+    } else if (owned.isEmpty()) {
+      alsoDrop->setText(QStringLiteral("Also leave the %1 shared group(s) from "
+                                       "this folder — you lose access to their "
+                                       "tags and notes")
+                            .arg(joined.size()));
+    } else {
+      alsoDrop->setText(
+          QStringLiteral("Also delete the %1 group(s) you created here and "
+                         "leave the %2 you joined")
+              .arg(owned.size())
+              .arg(joined.size()));
+    }
+    alsoDrop->setToolTip(QStringLiteral("Leave unticked to keep sharing; the "
+                                        "groups stay exactly as they are."));
+    layout->addWidget(alsoDrop);
+  }
+
+  auto *buttons =
+      new QDialogButtonBox(QDialogButtonBox::Cancel, Qt::Horizontal, &dlg);
+  auto *confirm = buttons->addButton(QStringLiteral("Stop Watching"),
+                                     QDialogButtonBox::AcceptRole);
+  connect(confirm, &QPushButton::clicked, &dlg, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  layout->addWidget(buttons);
+
+  if (dlg.exec() != QDialog::Accepted)
     return;
+
+  const bool dropGroups = alsoDrop && alsoDrop->isChecked();
 
   // Remove all PDFs from this folder and its subfolders
   const QList<PdfFile> allFiles = m_pdfModel->allFiles();
@@ -452,7 +519,25 @@ void MainWindow::onRemoveFolderRequested(const QString &path) {
   }
 
   m_db->deleteFolder(path);
+  for (const QString &folder : affected)
+    m_db->forgetFolderGroup(folder);
   m_folderModel->removeFolder(path); // triggers watcher via signal
+
+  if (m_selectedFilePath.startsWith(path)) {
+    m_selectedFilePath.clear();
+    m_notes.clear();
+    m_members.clear();
+  }
+
+  if (dropGroups) {
+    const int myId = m_api->currentUser().id;
+    for (const int groupId : owned)
+      m_api->deleteGroup(groupId, [this]() { reloadGroups(); });
+    for (const int groupId : joined)
+      m_api->removeMember(groupId, myId, [this]() { reloadGroups(); });
+  }
+
+  refreshDetailPane();
 }
 
 void MainWindow::onFileActivated(const QString &filePath) {
@@ -462,7 +547,7 @@ void MainWindow::onFileActivated(const QString &filePath) {
 void MainWindow::onFileSelected(const QString &filePath) {
   m_selectedFilePath = filePath;
   m_notes.clear();
-  m_selectedFileGroups.clear();
+  m_members.clear();
   refreshDetailPane();
   if (m_rightTabs)
     m_rightTabs->setCurrentIndex(0);
@@ -476,8 +561,10 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
   const int groupId = activeGroupId();
   if (groupId < 0) {
     QMessageBox::information(
-        this, QStringLiteral("Sign In Required"),
-        QStringLiteral("Sign in and pick a group before editing tags."));
+        this, QStringLiteral("No Group Yet"),
+        QStringLiteral("Tags belong to the group of the file's folder. Sign in "
+                       "and wait for '%1' to finish being shared.")
+            .arg(groupNameForFolder(groupFolderFor(filePath))));
     return;
   }
 
@@ -618,6 +705,9 @@ void MainWindow::onSignedIn() {
 
   reloadGroups([this]() {
     reloadTagVocabulary();
+    // Watched folders added while signed out — or on a previous run against a
+    // different account — get their groups now.
+    reconcileFolderGroups();
     refreshDetailPane();
   });
 }
@@ -646,13 +736,9 @@ void MainWindow::onSignOut() {
 
   m_groups.clear();
   m_notes.clear();
-  m_selectedFileGroups.clear();
-  m_activeGroupId = -1;
+  m_members.clear();
+  m_foldersTracking.clear();
 
-  {
-    const QSignalBlocker blocker(m_groupCombo);
-    m_groupCombo->clear();
-  }
   m_userLabel->setText(QStringLiteral("Not signed in"));
   setCollaborationEnabled(false);
   refreshDetailPane();
@@ -679,7 +765,6 @@ void MainWindow::showError(const ApiError &error) {
 }
 
 void MainWindow::setCollaborationEnabled(bool enabled) {
-  m_groupCombo->setEnabled(enabled);
   if (m_signInAction)
     m_signInAction->setEnabled(!enabled);
   if (m_signOutAction)
@@ -701,45 +786,226 @@ void MainWindow::reloadGroups(std::function<void()> onDone) {
   m_api->listGroups([this, onDone](const QList<ApiGroup> &groups) {
     m_groups = groups;
 
-    const int previous = m_activeGroupId;
-    {
-      const QSignalBlocker blocker(m_groupCombo);
-      m_groupCombo->clear();
-      for (const ApiGroup &group : m_groups)
-        m_groupCombo->addItem(group.name, group.id);
-    }
-
-    // Keep the user on the group they were using; fall back to their personal
-    // one, which always exists.
-    int index = m_groupCombo->findData(previous);
-    if (index < 0) {
-      const int remembered =
-          m_db->getSetting(QStringLiteral("activeGroupId"), -1).toInt();
-      index = m_groupCombo->findData(remembered);
-    }
-    if (index < 0) {
-      for (int i = 0; i < m_groups.size(); ++i) {
-        if (m_groups.at(i).isPersonal) {
-          index = i;
-          break;
-        }
-      }
-    }
-    if (index < 0 && !m_groups.isEmpty())
-      index = 0;
-
-    if (index >= 0) {
-      const QSignalBlocker blocker(m_groupCombo);
-      m_groupCombo->setCurrentIndex(index);
-      m_activeGroupId = m_groupCombo->itemData(index).toInt();
-      m_db->setSetting(QStringLiteral("activeGroupId"), m_activeGroupId);
-    } else {
-      m_activeGroupId = -1;
+    // A folder whose group has gone — deleted by its owner, or we were removed
+    // from it — must not keep pointing at a dead id. Dropping the mapping lets
+    // the next reconcile re-create or re-adopt one.
+    for (const QString &folder : m_db->mappedFolders()) {
+      const int mapped = m_db->folderGroupId(folder);
+      if (mapped >= 0 && !groupById(mapped).isValid())
+        m_db->forgetFolderGroup(folder);
     }
 
     if (onDone)
       onDone();
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Folder-derived groups
+//
+//  Every directory that directly holds a PDF is a group, and it holds exactly
+//  the PDFs sitting in it — not the ones in its subdirectories, which are
+//  groups of their own. Everything below turns that sentence into backend
+//  state.
+// ─────────────────────────────────────────────────────────────────────────────
+
+QString MainWindow::rootFolderFor(const QString &path) const {
+  QString best;
+  for (const QString &root : m_folderModel->allFolders()) {
+    if (!path.startsWith(root))
+      continue;
+    // A root nested inside another wins, so the innermost one owns the path.
+    if (root.length() > best.length())
+      best = root;
+  }
+  return best;
+}
+
+QString MainWindow::groupFolderFor(const QString &filePath) const {
+  if (filePath.isEmpty() || rootFolderFor(filePath).isEmpty())
+    return {};
+  return QFileInfo(filePath).absolutePath();
+}
+
+QStringList MainWindow::foldersHoldingPdfs() const {
+  QStringList folders;
+  for (const PdfFile &file : m_pdfModel->allFiles()) {
+    const QString folder = groupFolderFor(file.filePath);
+    if (!folder.isEmpty() && !folders.contains(folder))
+      folders << folder;
+  }
+  return folders;
+}
+
+QString MainWindow::groupNameForFolder(const QString &folderPath) const {
+  const QString root = rootFolderFor(folderPath);
+  if (root.isEmpty())
+    return QDir(folderPath).dirName();
+
+  QString rootName = QDir(root).dirName();
+  if (rootName.isEmpty())
+    rootName = root; // a filesystem root has no directory name
+
+  // Two watched roots can share a basename ("…/Work/Papers", "…/Home/Papers");
+  // qualify both, so their subfolder groups stay distinguishable too.
+  for (const QString &other : m_folderModel->allFolders()) {
+    if (other != root && QDir(other).dirName() == rootName) {
+      const QString parent = QFileInfo(root).dir().dirName();
+      if (!parent.isEmpty())
+        rootName = QStringLiteral("%1 (%2)").arg(rootName, parent);
+      break;
+    }
+  }
+
+  // Subfolders carry their path below the root, so "2023" under two different
+  // roots reads as "Papers/2023" and "Invoices/2023" rather than twice "2023".
+  const QString relative = QDir(root).relativeFilePath(folderPath);
+  if (relative.isEmpty() || relative == QLatin1String("."))
+    return rootName;
+  return QStringLiteral("%1/%2").arg(rootName, relative);
+}
+
+int MainWindow::groupIdForFolder(const QString &folderPath) const {
+  if (folderPath.isEmpty())
+    return -1;
+  const int mapped = m_db->folderGroupId(folderPath);
+  return groupById(mapped).isValid() ? mapped : -1;
+}
+
+void MainWindow::reconcileFolderGroups() {
+  if (!m_api->isAuthenticated())
+    return;
+
+  for (const QString &folder : foldersHoldingPdfs())
+    syncFolderGroup(folder);
+}
+
+void MainWindow::reconcileFoldersUnder(const QString &rootPath) {
+  if (!m_api->isAuthenticated())
+    return;
+
+  for (const QString &folder : foldersHoldingPdfs()) {
+    if (folder == rootPath || folder.startsWith(rootPath + QDir::separator()))
+      syncFolderGroup(folder);
+  }
+}
+
+void MainWindow::syncFolderGroup(const QString &folderPath) {
+  if (!m_api->isAuthenticated() || folderPath.isEmpty())
+    return;
+
+  const int mapped = groupIdForFolder(folderPath);
+  if (mapped >= 0) {
+    trackFilesIn(mapped, folderPath);
+    return;
+  }
+
+  // A directory earns a group by holding a PDF of its own. Pure container
+  // directories — ones whose PDFs all live further down — get nothing.
+  if (filesIn(folderPath).isEmpty())
+    return;
+
+  // Sign-out clears the id cache, so on the way back in we re-attach to the
+  // group we already own under this name rather than creating a second one.
+  const QString name = groupNameForFolder(folderPath);
+  const ApiGroup existing = groupByName(name);
+  if (existing.isValid() && existing.isOwner() && !existing.isPersonal) {
+    m_db->storeFolderGroup(folderPath, existing.id);
+    trackFilesIn(existing.id, folderPath);
+    refreshDetailPane();
+    return;
+  }
+
+  // Scans overlap — a directory change can land while the group for that same
+  // directory is still being created — so hold the folder until it comes back
+  // or a second group would be created under the same name.
+  if (m_foldersCreatingGroup.contains(folderPath))
+    return;
+  m_foldersCreatingGroup.insert(folderPath);
+
+  m_api->createGroup(
+      name,
+      [this, folderPath](const ApiGroup &group) {
+        m_foldersCreatingGroup.remove(folderPath);
+        m_db->storeFolderGroup(folderPath, group.id);
+        reloadGroups([this, folderPath, group]() {
+          trackFilesIn(group.id, folderPath);
+          refreshDetailPane();
+        });
+      },
+      [this, folderPath](const ApiError &error) {
+        m_foldersCreatingGroup.remove(folderPath);
+        showError(error);
+      });
+}
+
+QStringList MainWindow::filesIn(const QString &folderPath) const {
+  QStringList paths;
+  for (const PdfFile &file : m_pdfModel->allFiles()) {
+    // Directly in this directory only; a PDF one level down belongs to that
+    // level's own group.
+    if (file.folderPath == folderPath)
+      paths << file.filePath;
+  }
+  return paths;
+}
+
+void MainWindow::trackFilesIn(int groupId, const QString &folderPath) {
+  if (groupId < 0 || m_foldersTracking.contains(folderPath))
+    return;
+
+  QStringList pending;
+  for (const QString &filePath : filesIn(folderPath)) {
+    const QString hash = contentHashFor(filePath);
+    if (hash.isEmpty() || m_db->remoteFileId(groupId, hash) >= 0)
+      continue;
+    pending << filePath;
+  }
+
+  if (pending.isEmpty())
+    return;
+
+  m_foldersTracking.insert(folderPath);
+  registerNext(folderPath, groupId, pending);
+}
+
+void MainWindow::registerNext(const QString &folderPath, int groupId,
+                              QStringList pending) {
+  const QString groupName = groupNameForFolder(folderPath);
+
+  // Releasing the in-flight marker has to happen however the chain ends, or a
+  // later scan of the same folder would find it permanently "already running".
+  const auto finished = [this, folderPath, groupName](const QString &status) {
+    m_foldersTracking.remove(folderPath);
+    m_scanLabel->setText(status.arg(groupName));
+    QTimer::singleShot(3000, m_scanLabel, [this]() { m_scanLabel->clear(); });
+    reloadGroups([this]() { refreshDetailPane(); });
+  };
+
+  if (pending.isEmpty()) {
+    finished(QStringLiteral("✓ %1 up to date"));
+    return;
+  }
+
+  const QString filePath = pending.takeFirst();
+  m_scanLabel->setText(QStringLiteral("Adding %1 file(s) to %2…")
+                           .arg(pending.size() + 1)
+                           .arg(groupName));
+
+  // One at a time: a directory can hold hundreds of PDFs and each registration
+  // is a round trip. resolveRemoteFile caches the id it gets back, so a rescan
+  // of the same folder costs nothing.
+  resolveRemoteFile(
+      groupId, filePath,
+      [this, folderPath, groupId, pending](int) {
+        registerNext(folderPath, groupId, pending);
+      },
+      [this, finished](const ApiError &error) {
+        // One failure means the rest would almost certainly fail the same way,
+        // so stop and report once rather than opening a modal per file.
+        finished(QStringLiteral("⚠ %1 not fully shared"));
+        showError(error);
+      });
 }
 
 void MainWindow::reloadTagVocabulary() {
@@ -774,16 +1040,26 @@ QString MainWindow::contentHashFor(const QString &filePath) {
   return hash;
 }
 
-void MainWindow::resolveRemoteFile(int groupId, const QString &filePath,
-                                   std::function<void(int)> onReady) {
-  if (groupId < 0 || !m_api->isAuthenticated())
+void MainWindow::resolveRemoteFile(
+    int groupId, const QString &filePath, std::function<void(int)> onReady,
+    std::function<void(const ApiError &)> onFailed) {
+  const auto fail = [this, onFailed](const ApiError &error) {
+    if (onFailed)
+      onFailed(error);
+    else
+      showError(error);
+  };
+
+  if (groupId < 0 || !m_api->isAuthenticated()) {
+    fail(ApiError::network(
+        QStringLiteral("Sign in before sharing files with a group.")));
     return;
+  }
 
   const QString hash = contentHashFor(filePath);
   if (hash.isEmpty()) {
-    showError(ApiError::network(
-        QStringLiteral("Could not read %1 to identify it.")
-            .arg(QFileInfo(filePath).fileName())));
+    fail(ApiError::network(QStringLiteral("Could not read %1 to identify it.")
+                               .arg(QFileInfo(filePath).fileName())));
     return;
   }
 
@@ -803,14 +1079,19 @@ void MainWindow::resolveRemoteFile(int groupId, const QString &filePath,
       [this, groupId, hash, onReady](const ApiFile &file) {
         m_db->storeRemoteFileId(groupId, hash, file.id);
         onReady(file.id);
-      });
+      },
+      onFailed);  // empty → ApiClient falls back to the modal
 }
 
-int MainWindow::activeGroupId() const { return m_activeGroupId; }
+int MainWindow::activeGroupId() const {
+  return groupIdForFolder(groupFolderFor(m_selectedFilePath));
+}
 
-ApiGroup MainWindow::activeGroup() const { return groupById(m_activeGroupId); }
+ApiGroup MainWindow::activeGroup() const { return groupById(activeGroupId()); }
 
 ApiGroup MainWindow::groupById(int groupId) const {
+  if (groupId < 0)
+    return {};
   for (const ApiGroup &group : m_groups) {
     if (group.id == groupId)
       return group;
@@ -818,9 +1099,12 @@ ApiGroup MainWindow::groupById(int groupId) const {
   return {};
 }
 
-int MainWindow::selectedGroupId() const {
-  QListWidgetItem *item = m_groupList ? m_groupList->currentItem() : nullptr;
-  return item ? item->data(Qt::UserRole).toInt() : -1;
+ApiGroup MainWindow::groupByName(const QString &name) const {
+  for (const ApiGroup &group : m_groups) {
+    if (group.name.compare(name, Qt::CaseSensitive) == 0)
+      return group;
+  }
+  return {};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1021,232 +1305,81 @@ void MainWindow::deleteNote(const ApiNote &note) {
 //  Groups
 // ─────────────────────────────────────────────────────────────────────────────
 
-void MainWindow::onActiveGroupChanged(int index) {
-  if (index < 0)
-    return;
-
-  m_activeGroupId = m_groupCombo->itemData(index).toInt();
-  m_db->setSetting(QStringLiteral("activeGroupId"), m_activeGroupId);
-
-  // Tags and notes are scoped to the group, so both views have to be redrawn.
-  reloadTagVocabulary();
-  refreshDetailPane();
-}
-
-void MainWindow::onCreateGroup() {
-  bool ok = false;
-  const QString name = QInputDialog::getText(
-      this, QStringLiteral("New Group"),
-      QStringLiteral("Group name:\n\nYou'll be its owner — you can invite "
-                     "people once it exists."),
-      QLineEdit::Normal, QString{}, &ok);
-  if (!ok || name.trimmed().isEmpty())
-    return;
-
-  m_api->createGroup(name.trimmed(), [this](const ApiGroup &group) {
-    m_activeGroupId = group.id;
-    reloadGroups([this]() {
-      reloadTagVocabulary();
-      refreshDetailPane();
-    });
-  });
-}
-
 void MainWindow::onRenameGroup() {
-  const int groupId = selectedGroupId();
-  const ApiGroup group = groupById(groupId);
-  if (!group.isValid())
+  const ApiGroup group = activeGroup();
+  if (!group.isValid() || !group.isOwner())
     return;
 
   bool ok = false;
   const QString name = QInputDialog::getText(
-      this, QStringLiteral("Rename Group"), QStringLiteral("Group name:"),
+      this, QStringLiteral("Rename Group"),
+      QStringLiteral("Group name:\n\nThis renames the group everyone sees. The "
+                     "folder on your disk keeps its own name."),
       QLineEdit::Normal, group.name, &ok);
   if (!ok || name.trimmed().isEmpty() || name.trimmed() == group.name)
     return;
 
-  m_api->renameGroup(groupId, name.trimmed(), [this](const ApiGroup &) {
+  m_api->renameGroup(group.id, name.trimmed(), [this](const ApiGroup &) {
     reloadGroups([this]() { refreshDetailPane(); });
   });
 }
 
-void MainWindow::onDeleteGroup() {
-  const int groupId = selectedGroupId();
-  const ApiGroup group = groupById(groupId);
-  if (!group.isValid())
+void MainWindow::onInviteMember() {
+  const ApiGroup group = activeGroup();
+  const QString email = m_inviteEdit->text().trimmed();
+  if (!group.isValid() || !group.isOwner() || email.isEmpty())
+    return;
+
+  m_api->addMember(group.id, email, [this](const ApiMember &) {
+    m_inviteEdit->clear();
+    refreshMembers();
+    reloadGroups();
+  });
+}
+
+void MainWindow::removeMember(const ApiMember &member) {
+  const ApiGroup group = activeGroup();
+  if (!group.isValid() || !group.isOwner())
     return;
 
   const auto reply = QMessageBox::question(
-      this, QStringLiteral("Delete Group"),
-      QStringLiteral("Delete '%1'?\n\nIts tags and notes are removed for "
-                     "every member. The PDFs on your disk are untouched.")
+      this, QStringLiteral("Remove Member"),
+      QStringLiteral("Remove %1 <%2> from '%3'?\n\nThey lose access to the "
+                     "group's files, tags and notes. Notes they wrote stay.")
+          .arg(member.displayName, member.email, group.name),
+      QMessageBox::Yes | QMessageBox::Cancel);
+  if (reply != QMessageBox::Yes)
+    return;
+
+  m_api->removeMember(group.id, member.userId, [this]() {
+    refreshMembers();
+    reloadGroups();
+  });
+}
+
+void MainWindow::onLeaveGroup() {
+  const ApiGroup group = activeGroup();
+  if (!group.isValid() || group.isOwner() || group.isPersonal)
+    return;
+
+  const auto reply = QMessageBox::question(
+      this, QStringLiteral("Leave Group"),
+      QStringLiteral("Leave '%1'?\n\nYou lose access to its shared tags and "
+                     "notes. Your local copies of the PDFs are untouched.")
           .arg(group.name),
       QMessageBox::Yes | QMessageBox::Cancel);
   if (reply != QMessageBox::Yes)
     return;
 
-  m_api->deleteGroup(groupId, [this, groupId]() {
-    if (m_activeGroupId == groupId)
-      m_activeGroupId = -1;
+  const int groupId = group.id;
+  m_api->removeMember(groupId, m_api->currentUser().id, [this, groupId]() {
+    const QString folder = m_db->folderForGroup(groupId);
+    if (!folder.isEmpty())
+      m_db->forgetFolderGroup(folder);
     reloadGroups([this]() {
       reloadTagVocabulary();
       refreshDetailPane();
     });
-  });
-}
-
-void MainWindow::onManageMembers() {
-  const int groupId = selectedGroupId();
-  const ApiGroup group = groupById(groupId);
-  if (!group.isValid())
-    return;
-
-  QDialog dlg(this);
-  dlg.setWindowTitle(QStringLiteral("Members — %1").arg(group.name));
-  dlg.setMinimumWidth(420);
-
-  auto *layout = new QVBoxLayout(&dlg);
-  auto *memberList = new QListWidget(&dlg);
-  layout->addWidget(memberList);
-
-  auto *addRow = new QHBoxLayout;
-  auto *emailEdit = new QLineEdit(&dlg);
-  emailEdit->setPlaceholderText(QStringLiteral("teammate@example.com"));
-  auto *addBtn = new QPushButton(QStringLiteral("Invite"), &dlg);
-  auto *removeBtn = new QPushButton(QStringLiteral("Remove"), &dlg);
-  addRow->addWidget(emailEdit);
-  addRow->addWidget(addBtn);
-  addRow->addWidget(removeBtn);
-  layout->addLayout(addRow);
-
-  auto *hint = new QLabel(&dlg);
-  hint->setWordWrap(true);
-  hint->setStyleSheet(QStringLiteral("color: #8a8d95; font-size: 8pt;"));
-  hint->setText(
-      group.isOwner()
-          ? QStringLiteral("Members can add files, tags and notes. Only you "
-                           "can invite or remove people. Notes can only ever "
-                           "be edited by whoever wrote them.")
-          : QStringLiteral("Only the group owner can invite or remove "
-                           "members. You can remove yourself."));
-  layout->addWidget(hint);
-
-  auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
-  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-  layout->addWidget(buttons);
-
-  const int myId = m_api->currentUser().id;
-
-  auto reload = [this, groupId, memberList]() {
-    m_api->listMembers(groupId, [memberList](const QList<ApiMember> &members) {
-      memberList->clear();
-      for (const ApiMember &member : members) {
-        auto *item = new QListWidgetItem(
-            QStringLiteral("%1  <%2>%3")
-                .arg(member.displayName, member.email,
-                     member.isOwner() ? QStringLiteral("  — owner")
-                                      : QString{}),
-            memberList);
-        item->setData(Qt::UserRole, member.userId);
-        item->setData(Qt::UserRole + 1, member.isOwner());
-      }
-    });
-  };
-
-  // The owner may invite anyone; a member may only remove themselves.
-  addBtn->setEnabled(group.isOwner() && !group.isPersonal);
-  emailEdit->setEnabled(group.isOwner() && !group.isPersonal);
-
-  connect(addBtn, &QPushButton::clicked, &dlg, [&]() {
-    const QString email = emailEdit->text().trimmed();
-    if (email.isEmpty())
-      return;
-    m_api->addMember(groupId, email, [&, reload](const ApiMember &) {
-      emailEdit->clear();
-      reload();
-      reloadGroups();
-    });
-  });
-
-  connect(removeBtn, &QPushButton::clicked, &dlg, [&]() {
-    QListWidgetItem *item = memberList->currentItem();
-    if (!item)
-      return;
-    const int userId = item->data(Qt::UserRole).toInt();
-
-    const QString question =
-        userId == myId
-            ? QStringLiteral("Leave '%1'? You'll lose access to its files, "
-                             "tags and notes.")
-                  .arg(group.name)
-            : QStringLiteral("Remove %1 from '%2'?")
-                  .arg(item->text(), group.name);
-    if (QMessageBox::question(&dlg, QStringLiteral("Remove Member"), question,
-                              QMessageBox::Yes | QMessageBox::Cancel) !=
-        QMessageBox::Yes)
-      return;
-
-    m_api->removeMember(groupId, userId, [&, reload, userId]() {
-      if (userId == myId) {
-        dlg.accept();
-        reloadGroups([this]() { refreshDetailPane(); });
-        return;
-      }
-      reload();
-      reloadGroups();
-    });
-  });
-
-  reload();
-  dlg.exec();
-}
-
-void MainWindow::onGroupItemChanged(QListWidgetItem *item) {
-  const PdfFile file = m_pdfModel->fileByPath(m_selectedFilePath);
-  if (!file.isValid() || !item)
-    return;
-
-  const int groupId = item->data(Qt::UserRole).toInt();
-  const bool wanted = item->checkState() == Qt::Checked;
-  const QString filePath = m_selectedFilePath;
-
-  if (wanted) {
-    m_selectedFileGroups.insert(groupId);
-    resolveRemoteFile(groupId, filePath, [this, groupId](int) {
-      if (groupId == activeGroupId())
-        refreshNotes();
-      reloadGroups();
-    });
-    return;
-  }
-
-  const QString hash = contentHashFor(filePath);
-  const int remoteFileId =
-      hash.isEmpty() ? -1 : m_db->remoteFileId(groupId, hash);
-  if (remoteFileId < 0) {
-    m_selectedFileGroups.remove(groupId);
-    return;
-  }
-
-  const ApiGroup group = groupById(groupId);
-  const auto reply = QMessageBox::question(
-      this, QStringLiteral("Remove From Group"),
-      QStringLiteral("Remove '%1' from '%2'?\n\nIts tags and notes in that "
-                     "group are deleted for everyone. The file on your disk "
-                     "is untouched.")
-          .arg(file.fileName, group.name),
-      QMessageBox::Yes | QMessageBox::Cancel);
-  if (reply != QMessageBox::Yes) {
-    refreshGroupList();  // put the tick back
-    return;
-  }
-
-  m_api->removeFile(groupId, remoteFileId, [this, groupId, hash]() {
-    m_selectedFileGroups.remove(groupId);
-    m_db->forgetRemoteFile(groupId, hash);
-    if (groupId == activeGroupId())
-      refreshNotes();
-    reloadGroups();
   });
 }
 
@@ -1255,7 +1388,7 @@ void MainWindow::onGroupItemChanged(QListWidgetItem *item) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 void MainWindow::onSyncGroup() {
-  const int groupId = selectedGroupId();
+  const int groupId = activeGroupId();
   const ApiGroup group = groupById(groupId);
   if (!group.isValid())
     return;
@@ -1349,8 +1482,10 @@ void MainWindow::openTagManager() {
   const int groupId = activeGroupId();
   if (groupId < 0) {
     QMessageBox::information(
-        this, QStringLiteral("Sign In Required"),
-        QStringLiteral("Sign in and pick a group to manage its tags."));
+        this, QStringLiteral("No Group Selected"),
+        QStringLiteral("A tag vocabulary belongs to a group, and a group comes "
+                       "from a watched folder. Sign in and select a file to "
+                       "manage its folder's tags."));
     return;
   }
 
@@ -1398,6 +1533,11 @@ void MainWindow::onScanFinished(const QString &folder) {
 
   // Clear the message after 3 seconds
   QTimer::singleShot(3000, m_scanLabel, [this]() { m_scanLabel->clear(); });
+
+  // The scan is what tells us which directories under this root hold PDFs, so
+  // it is also when their groups get created and their files registered.
+  // Anything already known to the backend is skipped, so a rescan is cheap.
+  reconcileFoldersUnder(folder);
 }
 
 QWidget *MainWindow::buildDetailPane() {
@@ -1413,25 +1553,59 @@ QWidget *MainWindow::buildDetailPane() {
   m_detailMeta->setWordWrap(true);
   root->addWidget(m_detailMeta);
 
-  root->addWidget(new QLabel(QStringLiteral("GROUPS"), pane));
-  m_groupList = new QListWidget(pane);
-  m_groupList->setMinimumHeight(120);
-  m_groupList->setToolTip(
-      QStringLiteral("Tick a group to share this file with its members"));
-  root->addWidget(m_groupList);
+  // ── Group ─────────────────────────────────────────────────────────────────
+  // Not a picker: the file's folder decides its group, so this only reports
+  // which group that is and who is in it.
+  auto *groupTitle = new QLabel(QStringLiteral("GROUP"), pane);
+  groupTitle->setObjectName(QStringLiteral("sectionLabel"));
+  root->addWidget(groupTitle);
+
+  m_groupHeader = new QLabel(QStringLiteral("—"), pane);
+  m_groupHeader->setWordWrap(true);
+  QFont groupFont = m_groupHeader->font();
+  groupFont.setBold(true);
+  m_groupHeader->setFont(groupFont);
+  root->addWidget(m_groupHeader);
+
+  m_groupMeta = new QLabel(pane);
+  m_groupMeta->setWordWrap(true);
+  m_groupMeta->setStyleSheet(QStringLiteral("color: #8a8d95; font-size: 8pt;"));
+  root->addWidget(m_groupMeta);
 
   auto *groupRow = new QHBoxLayout;
-  m_addGroupBtn = new QPushButton(QStringLiteral("New"), pane);
   m_renameGroupBtn = new QPushButton(QStringLiteral("Rename"), pane);
-  m_removeGroupBtn = new QPushButton(QStringLiteral("Delete"), pane);
-  m_membersBtn = new QPushButton(QStringLiteral("Members"), pane);
+  m_leaveGroupBtn = new QPushButton(QStringLiteral("Leave"), pane);
   m_syncBtn = new QPushButton(QStringLiteral("Sync"), pane);
-  groupRow->addWidget(m_addGroupBtn);
   groupRow->addWidget(m_renameGroupBtn);
-  groupRow->addWidget(m_removeGroupBtn);
-  groupRow->addWidget(m_membersBtn);
+  groupRow->addWidget(m_leaveGroupBtn);
   groupRow->addWidget(m_syncBtn);
+  groupRow->addStretch();
   root->addLayout(groupRow);
+
+  // ── Members ───────────────────────────────────────────────────────────────
+  m_membersTitle = new QLabel(QStringLiteral("MEMBERS"), pane);
+  m_membersTitle->setObjectName(QStringLiteral("sectionLabel"));
+  root->addWidget(m_membersTitle);
+
+  auto *memberScroll = new QScrollArea(pane);
+  memberScroll->setWidgetResizable(true);
+  memberScroll->setFrameShape(QFrame::NoFrame);
+  memberScroll->setMaximumHeight(140);
+  auto *memberBody = new QWidget(memberScroll);
+  m_membersLayout = new QVBoxLayout(memberBody);
+  m_membersLayout->setContentsMargins(0, 0, 0, 0);
+  m_membersLayout->setSpacing(2);
+  m_membersLayout->addStretch();
+  memberScroll->setWidget(memberBody);
+  root->addWidget(memberScroll);
+
+  auto *inviteRow = new QHBoxLayout;
+  m_inviteEdit = new QLineEdit(pane);
+  m_inviteEdit->setPlaceholderText(QStringLiteral("teammate@example.com"));
+  m_inviteBtn = new QPushButton(QStringLiteral("Invite"), pane);
+  inviteRow->addWidget(m_inviteEdit);
+  inviteRow->addWidget(m_inviteBtn);
+  root->addLayout(inviteRow);
 
   root->addWidget(new QLabel(QStringLiteral("NOTES"), pane));
   m_noteEdit = new QTextEdit(pane);
@@ -1450,20 +1624,16 @@ QWidget *MainWindow::buildDetailPane() {
   noteScroll->setWidget(noteBody);
   root->addWidget(noteScroll, 1);
 
-  connect(m_addGroupBtn, &QPushButton::clicked, this,
-          &MainWindow::onCreateGroup);
   connect(m_renameGroupBtn, &QPushButton::clicked, this,
           &MainWindow::onRenameGroup);
-  connect(m_removeGroupBtn, &QPushButton::clicked, this,
-          &MainWindow::onDeleteGroup);
-  connect(m_membersBtn, &QPushButton::clicked, this,
-          &MainWindow::onManageMembers);
+  connect(m_leaveGroupBtn, &QPushButton::clicked, this,
+          &MainWindow::onLeaveGroup);
   connect(m_syncBtn, &QPushButton::clicked, this, &MainWindow::onSyncGroup);
   connect(m_addNoteBtn, &QPushButton::clicked, this, &MainWindow::onAddNote);
-  connect(m_groupList, &QListWidget::itemChanged, this,
-          &MainWindow::onGroupItemChanged);
-  connect(m_groupList, &QListWidget::currentItemChanged, this,
-          [this](QListWidgetItem *) { refreshDetailPane(); });
+  connect(m_inviteBtn, &QPushButton::clicked, this,
+          &MainWindow::onInviteMember);
+  connect(m_inviteEdit, &QLineEdit::returnPressed, this,
+          &MainWindow::onInviteMember);
 
   return pane;
 }
@@ -1489,29 +1659,33 @@ void MainWindow::refreshDetailPane() {
     m_detailMeta->clear();
   }
 
-  refreshGroupList();
+  refreshGroupHeader();
 
-  // A group must be selected in the list for the group-level buttons to have
-  // a target; ownership decides which of them are permitted.
-  const ApiGroup selected = groupById(selectedGroupId());
-  const bool hasSelection = selected.isValid();
-  const bool ownsSelection = hasSelection && selected.isOwner();
+  const ApiGroup group = activeGroup();
+  const bool hasGroup = group.isValid();
+  const bool isOwner = hasGroup && group.isOwner();
 
-  m_groupList->setEnabled(online);
-  m_addGroupBtn->setEnabled(online);
-  m_renameGroupBtn->setEnabled(ownsSelection && !selected.isPersonal);
-  m_removeGroupBtn->setEnabled(ownsSelection && !selected.isPersonal);
-  m_membersBtn->setEnabled(hasSelection && !selected.isPersonal);
-  m_syncBtn->setEnabled(hasSelection);
-
+  // Only the person who added the folder — the group's creator — may rename it
+  // or change who is in it. Everyone else gets the roster and a way out.
+  m_renameGroupBtn->setEnabled(isOwner && !group.isPersonal);
   m_renameGroupBtn->setToolTip(
-      hasSelection && !ownsSelection
-          ? QStringLiteral("Only the group's owner can rename it")
+      hasGroup && !isOwner
+          ? QStringLiteral("Only the group's creator can rename it")
           : QString{});
-  m_removeGroupBtn->setToolTip(
-      hasSelection && !ownsSelection
-          ? QStringLiteral("Only the group's owner can delete it")
-          : QString{});
+  m_leaveGroupBtn->setEnabled(hasGroup && !isOwner && !group.isPersonal);
+  m_leaveGroupBtn->setToolTip(
+      isOwner ? QStringLiteral(
+                    "You created this group — remove its folder to delete it")
+              : QString{});
+  m_syncBtn->setEnabled(hasGroup);
+
+  m_inviteEdit->setEnabled(isOwner && !group.isPersonal);
+  m_inviteBtn->setEnabled(isOwner && !group.isPersonal);
+  m_inviteEdit->setPlaceholderText(
+      isOwner ? QStringLiteral("teammate@example.com")
+              : QStringLiteral("Only the group's creator can invite people"));
+
+  refreshMembers();
 
   const bool canWriteNotes = online && hasFile && activeGroupId() >= 0;
   m_noteEdit->setEnabled(canWriteNotes);
@@ -1524,59 +1698,140 @@ void MainWindow::refreshDetailPane() {
   refreshNotes();
 }
 
-void MainWindow::refreshGroupList() {
-  if (!m_groupList)
+void MainWindow::refreshGroupHeader() {
+  // The detail pane is built before the toolbar, so both halves have to exist
+  // before either is written to.
+  if (!m_groupHeader || !m_groupLabel)
     return;
 
-  const int previous = selectedGroupId();
-  const PdfFile file = m_pdfModel->fileByPath(m_selectedFilePath);
-  const bool hasFile = file.isValid();
+  const bool online = m_api && m_api->isAuthenticated();
+  const QString folder = groupFolderFor(m_selectedFilePath);
+  const ApiGroup group = activeGroup();
 
-  // Which groups already hold this file, judged from the local id cache so
-  // the list draws without a round trip.
-  m_selectedFileGroups.clear();
-  if (hasFile) {
-    const QString hash = contentHashFor(m_selectedFilePath);
-    if (!hash.isEmpty()) {
-      for (const ApiGroup &group : m_groups) {
-        if (m_db->remoteFileId(group.id, hash) >= 0)
-          m_selectedFileGroups.insert(group.id);
-      }
-    }
+  // The toolbar and the detail pane name the same thing, so they are filled in
+  // together and can never disagree.
+  if (!online) {
+    m_groupHeader->setText(QStringLiteral("—"));
+    m_groupMeta->setText(QStringLiteral(
+        "Sign in to share a folder's PDFs with a group."));
+    m_groupLabel->setText(QStringLiteral("—"));
+    return;
   }
 
-  const QSignalBlocker blocker(m_groupList);
-  m_groupList->clear();
-
-  for (const ApiGroup &group : m_groups) {
-    auto *item = new QListWidgetItem(group.name, m_groupList);
-    item->setData(Qt::UserRole, group.id);
-
-    Qt::ItemFlags flags = item->flags();
-    if (hasFile)
-      flags |= Qt::ItemIsUserCheckable;
-    else
-      flags &= ~Qt::ItemIsUserCheckable;
-    item->setFlags(flags);
-
-    if (hasFile) {
-      item->setCheckState(m_selectedFileGroups.contains(group.id)
-                              ? Qt::Checked
-                              : Qt::Unchecked);
-    }
-
-    item->setToolTip(
-        QStringLiteral("%1\n%2 member(s), %3 file(s)\nYou are %4")
-            .arg(group.isPersonal ? QStringLiteral("Private to you")
-                                  : QStringLiteral("Shared group"))
-            .arg(group.memberCount)
-            .arg(group.fileCount)
-            .arg(group.isOwner() ? QStringLiteral("the owner")
-                                 : QStringLiteral("a member")));
-
-    if (group.id == previous)
-      m_groupList->setCurrentItem(item);
+  if (m_selectedFilePath.isEmpty() || folder.isEmpty()) {
+    m_groupHeader->setText(QStringLiteral("No file selected"));
+    m_groupMeta->setText(QStringLiteral(
+        "A file's group is the directory it sits in. Select a file to see its "
+        "group."));
+    m_groupLabel->setText(QStringLiteral("—"));
+    return;
   }
+
+  if (!group.isValid()) {
+    // The directory is watched but its group has not been created yet —
+    // usually a scan still in flight, or a failed registration.
+    m_groupHeader->setText(groupNameForFolder(folder));
+    m_groupMeta->setText(
+        QStringLiteral("Not shared yet — this directory's group is still being "
+                       "set up."));
+    m_groupLabel->setText(QStringLiteral("(pending)"));
+    return;
+  }
+
+  m_groupHeader->setText(
+      QStringLiteral("%1  ·  %2")
+          .arg(group.name, group.isOwner() ? QStringLiteral("you created it")
+                                           : QStringLiteral("you're a member")));
+  // Subdirectories are groups of their own, so say what this count covers.
+  m_groupMeta->setText(
+      QStringLiteral("from %1\n%2 file(s) shared — subfolders are their own "
+                     "groups")
+          .arg(folder)
+          .arg(group.fileCount));
+  m_groupLabel->setText(group.name);
+}
+
+void MainWindow::refreshMembers() {
+  if (!m_membersLayout)
+    return;
+
+  // Clear first, so a failed reload never leaves someone else's roster on
+  // screen next to this group's name.
+  while (QLayoutItem *item = m_membersLayout->takeAt(0)) {
+    delete item->widget();
+    delete item;
+  }
+
+  const ApiGroup group = activeGroup();
+  if (!group.isValid() || !m_api->isAuthenticated()) {
+    m_members.clear();
+    m_membersTitle->setText(QStringLiteral("MEMBERS"));
+    m_membersLayout->addStretch();
+    return;
+  }
+
+  const int groupIdAtRequest = group.id;
+  m_api->listMembers(
+      groupIdAtRequest, [this, groupIdAtRequest](const QList<ApiMember> &members) {
+        // The user may have selected a file in another folder meanwhile.
+        if (groupIdAtRequest != activeGroupId())
+          return;
+
+        m_members = members;
+        while (QLayoutItem *item = m_membersLayout->takeAt(0)) {
+          delete item->widget();
+          delete item;
+        }
+
+        const ApiGroup current = activeGroup();
+        m_membersTitle->setText(
+            QStringLiteral("MEMBERS (%1)").arg(m_members.size()));
+        for (const ApiMember &member : m_members)
+          m_membersLayout->addWidget(buildMemberRow(member, current));
+
+        m_membersLayout->addStretch();
+      });
+}
+
+QWidget *MainWindow::buildMemberRow(const ApiMember &member,
+                                    const ApiGroup &group) {
+  auto *row = new QWidget;
+  auto *rl = new QHBoxLayout(row);
+  rl->setContentsMargins(2, 2, 2, 2);
+  rl->setSpacing(6);
+
+  auto *who = new QLabel(
+      QStringLiteral("%1  <%2>").arg(member.displayName, member.email), row);
+  who->setToolTip(QStringLiteral("Joined %1").arg(
+      member.joinedAt.toLocalTime().toString(QStringLiteral("yyyy-MM-dd"))));
+  rl->addWidget(who);
+  rl->addStretch();
+
+  auto *role = new QLabel(member.isOwner() ? QStringLiteral("creator")
+                                           : QStringLiteral("member"),
+                          row);
+  role->setStyleSheet(
+      member.isOwner()
+          ? QStringLiteral("color: #9fb3ff; font-size: 8pt;")
+          : QStringLiteral("color: #6a6d75; font-size: 8pt;"));
+  rl->addWidget(role);
+
+  // Only the creator removes people, and never themselves — the backend
+  // enforces both rules regardless, so this is presentation.
+  if (group.isOwner() && !member.isOwner()) {
+    auto *removeBtn = new QPushButton(QStringLiteral("✕"), row);
+    removeBtn->setFlat(true);
+    removeBtn->setCursor(Qt::PointingHandCursor);
+    removeBtn->setToolTip(
+        QStringLiteral("Remove %1 from this group").arg(member.displayName));
+    removeBtn->setStyleSheet(
+        QStringLiteral("padding: 0 6px; font-size: 9pt; color: #8a8d95;"));
+    rl->addWidget(removeBtn);
+    connect(removeBtn, &QPushButton::clicked, this,
+            [this, member]() { removeMember(member); });
+  }
+
+  return row;
 }
 
 void MainWindow::applyDarkTheme(bool enabled) {

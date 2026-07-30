@@ -47,7 +47,7 @@ exercised by SQLite.
 | Table | Purpose |
 |---|---|
 | `users` | Accounts. Passwords are SHA-256-prehashed then bcrypt-hashed. |
-| `groups` | Sharing unit. Every user gets a private `is_personal` group at signup. |
+| `groups` | Sharing unit. Every user gets a private `is_personal` group at signup. The desktop client creates one group per directory that holds a PDF — see the client README — but the API places no such restriction on group membership or naming. |
 | `group_members` | `owner` or `member`. |
 | `files` | One row per **content hash**, not per path. |
 | `group_files` | Which groups hold a file, plus that group's display name for it. |
