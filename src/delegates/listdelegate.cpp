@@ -39,6 +39,12 @@ void ListDelegate::paint(QPainter* painter,
     const QStringList tags     = index.data(PdfModel::TagsRole).toStringList();
     const QDateTime   opened   = index.data(PdfModel::LastOpenedRole).toDateTime();
     const QPixmap     thumb    = qvariant_cast<QPixmap>(index.data(PdfModel::ThumbnailRole));
+    const bool        removing = index.data(PdfModel::PendingRemovalRole).toBool();
+
+    // A removal is a round trip that can fail, so the row is faded rather than
+    // taken away — the user sees it is on its way out and can carry on.
+    if (removing)
+        painter->setOpacity(0.45);
 
     const QString dateStr = opened.isValid()
         ? opened.toString(QStringLiteral("dd MMM yyyy"))
@@ -66,7 +72,7 @@ void ListDelegate::paint(QPainter* painter,
 
     const QRect primaryRect(textLeft, rect.top() + 7,
                             textRight - textLeft - 4, 18);
-    drawPrimaryText(painter, primaryRect, name);
+    drawPrimaryText(painter, primaryRect, name, removing);
 
     // Tag pills on the second line
     const int pillY = primaryRect.bottom() + 4;
@@ -75,7 +81,8 @@ void ListDelegate::paint(QPainter* painter,
 
     // ── Date + folder (right-aligned) ─────────────────────────────────────────
     const QRect rightRect(textRight, rect.top() + 5, dateWidth, rect.height() - 10);
-    drawSecondaryText(painter, rightRect, folder, dateStr);
+    drawSecondaryText(painter, rightRect, folder,
+                      removing ? QStringLiteral("Removing…") : dateStr);
 
     painter->restore();
 }
@@ -117,11 +124,12 @@ void ListDelegate::drawIcon(QPainter* p, const QRect& iconRect,
 }
 
 void ListDelegate::drawPrimaryText(QPainter* p, const QRect& r,
-                                    const QString& name) const
+                                    const QString& name, bool struckThrough) const
 {
     QFont f = QApplication::font();
     f.setBold(true);
     f.setPointSize(9);
+    f.setStrikeOut(struckThrough);
     p->setFont(f);
     p->setPen(QColor(0xe0, 0xe3, 0xe8));
 

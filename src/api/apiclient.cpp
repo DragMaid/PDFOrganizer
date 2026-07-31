@@ -67,9 +67,23 @@ void ApiClient::connectWebSocket() {
 
     connect(m_webSocket, &QWebSocket::textMessageReceived, this,
             [this](const QString &msg) {
-              if (msg == QStringLiteral("sync_needed")) {
+              // Every event means at least "this group moved", which is all the
+              // sync indicators need; syncNeeded() carries exactly that much and
+              // is emitted for anything the server pushes.
+              const QJsonDocument doc =
+                  QJsonDocument::fromJson(msg.toUtf8());
+              if (!doc.isObject()) {
                 emit syncNeeded();
+                return;
               }
+
+              const ApiRemoteEvent event =
+                  ApiRemoteEvent::fromJson(doc.object());
+              if (!event.isValid())
+                return;
+
+              emit remoteEvent(event);
+              emit syncNeeded();
             });
 
     connect(m_webSocket, &QWebSocket::disconnected, this, [this]() {

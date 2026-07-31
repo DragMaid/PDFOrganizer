@@ -23,7 +23,7 @@ from ..deps import CurrentUser, DbSession, group_file_or_404, group_or_404
 from ..errors import bad_request, conflict, not_found
 from ..models import FileTag, GroupMember, Tag
 from ..schemas import TagAssign, TagCreate, TagOut, TagSet
-from .ws import manager
+from .ws import notify
 
 router = APIRouter(tags=["tags"])
 
@@ -83,13 +83,20 @@ def list_group_tags(group_id: int, user: CurrentUser, db: DbSession) -> list[Tag
     "/groups/{group_id}/tags", response_model=TagOut, status_code=status.HTTP_200_OK
 )
 def create_tag(
-    group_id: int, payload: TagCreate, user: CurrentUser, db: DbSession
+    group_id: int,
+    payload: TagCreate,
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> Tag:
     """Create a tag, or hand back the one that already exists. Never 409s."""
     group_or_404(db, group_id, user)
     tag = _get_or_create_tag(db, group_id, payload.name, user.id)
     db.commit()
     db.refresh(tag)
+    notify(
+        background_tasks, group_id, "tag_created", tag_id=tag.id, actor_id=user.id
+    )
     return tag
 
 
@@ -123,7 +130,9 @@ def rename_tag(
     tag.name_lower = lower
     db.commit()
     db.refresh(tag)
-    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+    notify(
+        background_tasks, group_id, "tag_renamed", tag_id=tag.id, actor_id=user.id
+    )
     return tag
 
 
@@ -138,7 +147,7 @@ def delete_tag(group_id: int, tag_id: int, user: CurrentUser, db: DbSession, bac
         return
     db.delete(tag)
     db.commit()
-    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+    notify(background_tasks, group_id, "tag_deleted", tag_id=tag_id, actor_id=user.id)
 
 
 # ── Assignment ────────────────────────────────────────────────────────────────
@@ -189,7 +198,13 @@ def add_file_tag(
         .on_conflict_do_nothing(index_elements=["file_id", "tag_id"])
     )
     db.commit()
-    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+    notify(
+        background_tasks,
+        group_id,
+        "file_tags_changed",
+        file_id=file_id,
+        actor_id=user.id,
+    )
     return list_file_tags(group_id, file_id, user, db)
 
 
@@ -238,7 +253,13 @@ def set_file_tags(
             .on_conflict_do_nothing(index_elements=["file_id", "tag_id"])
         )
     db.commit()
-    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+    notify(
+        background_tasks,
+        group_id,
+        "file_tags_changed",
+        file_id=file_id,
+        actor_id=user.id,
+    )
     return list_file_tags(group_id, file_id, user, db)
 
 
@@ -266,3 +287,10 @@ def remove_file_tag(
         delete(FileTag).where(FileTag.file_id == file_id, FileTag.tag_id == tag_id)
     )
     db.commit()
+    notify(
+        background_tasks,
+        group_id,
+        "file_tags_changed",
+        file_id=file_id,
+        actor_id=user.id,
+    )

@@ -30,6 +30,12 @@ void GridDelegate::paint(QPainter* painter,
     const QString     name  = index.data(PdfModel::FileNameRole).toString();
     const QStringList tags  = index.data(PdfModel::TagsRole).toStringList();
     const QPixmap     thumb = qvariant_cast<QPixmap>(index.data(PdfModel::ThumbnailRole));
+    const bool     removing = index.data(PdfModel::PendingRemovalRole).toBool();
+
+    // A removal is a round trip that can fail, so the card is faded rather than
+    // taken away — the user sees it is on its way out and can carry on.
+    if (removing)
+        painter->setOpacity(0.45);
 
     // ── Background card ───────────────────────────────────────────────────────
     drawCard(painter, rect, selected, hovered);
@@ -47,7 +53,7 @@ void GridDelegate::paint(QPainter* painter,
     const int infoTop = rect.top() + kThumbHeight + kPadding;
     const QRect nameRect(rect.left() + kPadding, infoTop,
                          rect.width() - 2 * kPadding, 20);
-    drawFileName(painter, nameRect, name);
+    drawFileName(painter, nameRect, name, removing);
 
     // ── Tag pills ─────────────────────────────────────────────────────────────
     const QRect pillRect(rect.left() + kPadding, nameRect.bottom() + 4,
@@ -111,11 +117,13 @@ void GridDelegate::drawThumbnail(QPainter* p,
 
 void GridDelegate::drawFileName(QPainter* p,
                                  const QRect& rect,
-                                 const QString& name) const
+                                 const QString& name,
+                                 bool struckThrough) const
 {
     QFont f = QApplication::font();
     f.setBold(true);
     f.setPointSize(8);
+    f.setStrikeOut(struckThrough);
     p->setFont(f);
     p->setPen(QColor(0xe0, 0xe3, 0xe8));
 

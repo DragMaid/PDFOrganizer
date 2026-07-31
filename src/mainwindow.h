@@ -98,6 +98,11 @@ private slots:
     void onAddFolderRequested();
     void onRemoveFolderRequested(const QString& path);
 
+    /// A folder was clicked in the sidebar. Besides filtering the file list,
+    /// this *selects that folder's group* — which is what makes a group with no
+    /// files left on this machine reachable again.
+    void onFolderSelected  (const QString& folderPath);
+
     // ── PDF events ────────────────────────────────────────────────────────────
     void onFileActivated   (const QString& filePath);
     void onEditTagsRequested(const QString& filePath);
@@ -114,6 +119,9 @@ private slots:
     void onSignOut();
     void onApiError(const ApiError& error);
     void onSessionExpired();
+    /// Someone else changed something shared. Refreshes only the parts of the
+    /// UI the event actually touches, then restates the sync indicators.
+    void onRemoteEvent(const ApiRemoteEvent& event);
 
     // ── Groups ────────────────────────────────────────────────────────────────
     void onRenameGroup();
@@ -165,8 +173,18 @@ private:
 
     /// One note, with Edit/Delete shown only when the signed-in user wrote it.
     QWidget* buildNoteBubble(const ApiNote& note);
+    /// A note written while offline, still sitting in the local queue. It has no
+    /// id yet, so it cannot be edited or deleted through the API — it is shown
+    /// so that typing a note never looks like it did nothing.
+    QWidget* buildQueuedNoteBubble(const QString& body);
     void editNote  (const ApiNote& note);
     void deleteNote(const ApiNote& note);
+
+    // ── Background activity ───────────────────────────────────────────────────
+    /// Say what is happening, without a modal and without disabling anything.
+    /// @p autoClearMs of 0 leaves the message until something replaces it.
+    void showActivity(const QString& message, int autoClearMs = 0);
+    void clearActivity();
 
     // ── Session ───────────────────────────────────────────────────────────────
     void restoreSessionOrPrompt();
@@ -242,14 +260,47 @@ private:
     /// hashes local files, and hashing caches.
     [[nodiscard]] SyncPlan planSync(int groupId, const ApiSyncStatus& status);
 
-    /// Ask the server for the group's files and restate the Sync button.
+    /// What one group's counts came out as, kept per group rather than only for
+    /// the selected one — the sidebar badges and the status-bar banner have to
+    /// speak for folders nobody has clicked on.
+    struct SyncCounts
+    {
+        int  uploads      = 0;
+        int  downloads    = 0;
+        int  pendingMeta  = 0;
+        bool known        = false;  ///< False until the first reply lands.
+
+        [[nodiscard]] bool behind()   const { return downloads > 0; }
+        [[nodiscard]] bool ahead()    const { return uploads > 0 || pendingMeta > 0; }
+        [[nodiscard]] bool inSync()   const { return !behind() && !ahead(); }
+        /// "↑2 ↓1", or empty when there is nothing to say.
+        [[nodiscard]] QString badge() const;
+        [[nodiscard]] QString describe() const;
+    };
+
+    /// Ask the server for the active group's files and restate the Sync button.
     /// Cheap to call: it only makes a request when the active group changed or
     /// @p force says something happened that the counts cannot predict.
     void refreshSyncCounts(bool force = false);
+    /// The same question for every group this machine has a folder for, which
+    /// is what the sidebar badges and the status-bar banner are drawn from.
+    /// Only groups marked stale are actually asked about.
+    void refreshAllSyncCounts(bool force = false);
+    /// Ask about one group and fold the answer into m_syncCounts.
+    void refreshSyncCountsFor(int groupId, bool force);
     /// Redraw the Sync button from the last counts we were given.
     void updateSyncButton();
-    /// Something local changed that makes the counts stale — recount.
+    /// Redraw everything that reports how far out of sync anything is: the
+    /// sidebar badges, the status-bar banner and the window title.
+    void updateSyncIndicators();
+    /// Something local changed that makes the counts stale — recount. Without a
+    /// group id this means the active one.
     void markSyncPending();
+    void markSyncPending(int groupId);
+    /// Counts for @p groupId, or an all-zero unknown entry.
+    [[nodiscard]] SyncCounts countsFor(int groupId) const;
+    /// The group the status-bar banner is currently offering to sync, or -1.
+    [[nodiscard]] int mostOutOfSyncGroup() const;
 
     void syncPendingData(int groupId, std::function<void()> onDone);
     void syncNextPendingFile(int groupId, QStringList pending, std::function<void()> onDone);
@@ -267,8 +318,13 @@ private:
                            std::function<void(int)> onReady,
                            std::function<void(const ApiError&)> onFailed = {});
 
-    /// The group of the selected file's root folder — the only place a tag or
-    /// note this client writes can land.
+    /// The directory whose group is currently in context: the selected file's,
+    /// or — when no file is selected, or its folder has no group — the one
+    /// clicked in the sidebar.
+    [[nodiscard]] QString  activeFolderPath() const;
+
+    /// The group of the active folder — the only place a tag or note this
+    /// client writes can land.
     [[nodiscard]] int      activeGroupId() const;
     [[nodiscard]] ApiGroup activeGroup()   const;
     [[nodiscard]] ApiGroup groupById(int groupId) const;
@@ -366,6 +422,10 @@ private:
     QPushButton*     m_shareBtn    = nullptr;
     QLabel*          m_shareCodeLabel = nullptr;
     QString          m_selectedFilePath;
+    /// The folder clicked in the sidebar. It decides the active group whenever
+    /// the selected file does not — including when there is no file left to
+    /// select, which is the whole point of tracking it.
+    QString          m_selectedFolderPath;
 
     // ── Toolbar widgets ───────────────────────────────────────────────────────
     QLineEdit*       m_searchEdit  = nullptr;
@@ -381,6 +441,13 @@ private:
     QLabel*          m_statusLabel = nullptr;
     QLabel*          m_scanLabel   = nullptr;
     QLabel*          m_userLabel   = nullptr;
+    /// "↓3 to download in Papers" — clickable, and hidden when everything is up
+    /// to date. Non-modal on purpose: being out of sync is a fact to report,
+    /// not a decision to demand.
+    QPushButton*     m_syncBanner  = nullptr;
+    /// Work happening in the background right now ("Removing report.pdf…").
+    /// Separate from m_scanLabel so a scan finishing cannot wipe it.
+    QLabel*          m_activityLabel = nullptr;
 
     // ── Backend state ─────────────────────────────────────────────────────────
     QList<ApiGroup>  m_groups;
@@ -394,12 +461,20 @@ private:
     QSet<QString>    m_foldersCreatingGroup;
     bool             m_signingIn = false;
 
-    // ── Sync button state ─────────────────────────────────────────────────────
-    /// The group the counts below describe, so a reply that arrives after the
-    /// selection moved on is discarded instead of mislabelling another group.
-    int              m_syncCountsGroupId = -1;
-    int              m_syncUploads   = 0;
-    int              m_syncDownloads = 0;
-    int              m_syncPendingMeta = 0;
-    bool             m_syncCountsInFlight = false;
+    // ── Sync state ────────────────────────────────────────────────────────────
+    /// Group id → how far that group is out of sync. Every group with a local
+    /// folder has an entry, so the sidebar can badge a folder the user has not
+    /// selected and the banner can name the one that needs attention most.
+    QHash<int, SyncCounts> m_syncCounts;
+    /// Groups whose counts are known to be stale and worth re-asking about.
+    QSet<int>        m_syncStale;
+    /// Groups with a request already out, so a burst of events (a scan, or a
+    /// busy group) does not queue one round trip per event.
+    QSet<int>        m_syncInFlight;
+
+    // ── Removals in flight ────────────────────────────────────────────────────
+    /// Local paths whose removal request has not come back yet. Nothing is
+    /// blocked while one is outstanding; this only stops the same file being
+    /// submitted twice and lets the status bar say what is happening.
+    QSet<QString>    m_removingFiles;
 };

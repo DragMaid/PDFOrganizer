@@ -24,7 +24,7 @@ from ..deps import CurrentUser, DbSession, group_file_or_404, group_or_404
 from ..errors import bad_request, conflict, forbidden, not_found
 from ..models import Note, User
 from ..schemas import NoteOut, NoteCreate, NoteUpdate
-from .ws import manager
+from .ws import notify
 
 router = APIRouter(tags=["notes"])
 
@@ -105,7 +105,14 @@ def create_note(
     db.add(note)
     db.commit()
     db.refresh(note)
-    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+    notify(
+        background_tasks,
+        group_id,
+        "note_created",
+        file_id=file_id,
+        note_id=note.id,
+        actor_id=user.id,
+    )
     return _to_out(note, user, user.id)
 
 
@@ -144,7 +151,14 @@ def update_note(
     note.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(note)
-    background_tasks.add_task(manager.broadcast_to_group, note.group_id, "sync_needed", db)
+    notify(
+        background_tasks,
+        note.group_id,
+        "note_updated",
+        file_id=note.file_id,
+        note_id=note.id,
+        actor_id=user.id,
+    )
     return _to_out(note, author, user.id)
 
 
@@ -153,6 +167,7 @@ def delete_note(
     note_id: int,
     user: CurrentUser,
     db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> Response:
     note, author = _load(db, note_id)
     group_or_404(db, note.group_id, user)
@@ -165,4 +180,12 @@ def delete_note(
     # Soft delete keeps the row for auditing while hiding it everywhere.
     note.deleted_at = datetime.now(timezone.utc)
     db.commit()
+    notify(
+        background_tasks,
+        note.group_id,
+        "note_deleted",
+        file_id=note.file_id,
+        note_id=note.id,
+        actor_id=user.id,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)

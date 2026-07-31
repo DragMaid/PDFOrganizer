@@ -39,7 +39,7 @@ from ..schemas import (
     UploadResult,
 )
 from ..storage import object_name_for, sha256_of, storage
-from .ws import manager
+from .ws import notify
 
 router = APIRouter(prefix="/groups/{group_id}/files", tags=["files"])
 
@@ -89,7 +89,11 @@ def list_files(group_id: int, user: CurrentUser, db: DbSession) -> list[FileOut]
 
 @router.post("", response_model=FileOut, status_code=status.HTTP_200_OK)
 def register_file(
-    group_id: int, payload: FileRegister, user: CurrentUser, db: DbSession
+    group_id: int,
+    payload: FileRegister,
+    user: CurrentUser,
+    db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> FileOut:
     group_or_404(db, group_id, user)
 
@@ -114,6 +118,9 @@ def register_file(
     if payload.page_count and not file.page_count:
         file.page_count = payload.page_count
 
+    was_linked = (
+        db.get(GroupFile, {"group_id": group_id, "file_id": file.id}) is not None
+    )
     db.execute(
         pg_insert(GroupFile)
         .values(
@@ -129,6 +136,18 @@ def register_file(
     link = db.get(GroupFile, {"group_id": group_id, "file_id": file.id})
     assert link is not None
     db.refresh(file)
+
+    # Only a file the group had never seen is news. Registration is idempotent
+    # and a rescan re-registers everything, so announcing every call would wake
+    # every member's client up for nothing several times a minute.
+    if not was_linked:
+        notify(
+            background_tasks,
+            group_id,
+            "file_registered",
+            file_id=file.id,
+            actor_id=user.id,
+        )
     tags = _tags_for(db, group_id, [file.id])
     return _to_out(file, link, tags.get(file.id, []))
 
@@ -219,7 +238,14 @@ def remove_file(
         db.delete(file)
 
     db.commit()
-    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+    notify(
+        background_tasks,
+        group_id,
+        "file_removed",
+        file_id=file_id,
+        actor_id=user.id,
+        purged=purged,
+    )
 
     if not purge:
         message = "Removed from the group. The stored copy was kept."
@@ -327,7 +353,15 @@ def upload_file(
     file.uploaded_at = datetime.now(timezone.utc)
     file.uploaded_by = user.id
     db.commit()
-    background_tasks.add_task(manager.broadcast_to_group, group_id, "sync_needed", db)
+    # The download half of everyone else's sync only becomes possible now: the
+    # file was registered before, but there were no bytes to fetch.
+    notify(
+        background_tasks,
+        group_id,
+        "file_uploaded",
+        file_id=file.id,
+        actor_id=user.id,
+    )
 
     return UploadResult(
         file_id=file.id,

@@ -103,16 +103,49 @@ QVariant FolderTreeModel::data(const QModelIndex& index, int role) const
     const FolderNode* node = nodeFromIndex(index);
     if (!node) return {};
 
+    const QString badge = m_badges.value(node->absolutePath);
+
     switch (role) {
     case Qt::DisplayRole:
+        // The badge rides along in the display text rather than in a role of
+        // its own, so the stock tree delegate draws it without help.
+        return badge.isEmpty() ? node->name
+                               : QStringLiteral("%1  %2").arg(node->name, badge);
     case Qt::EditRole:
         return node->name;
-    case Qt::ToolTipRole:
-        return node->absolutePath;
+    case Qt::ToolTipRole: {
+        const QString explanation = m_badgeTooltips.value(node->absolutePath);
+        return explanation.isEmpty()
+            ? node->absolutePath
+            : QStringLiteral("%1\n\n%2").arg(node->absolutePath, explanation);
+    }
     case Qt::UserRole:
         return node->absolutePath;  // for programmatic access
     }
     return {};
+}
+
+void FolderTreeModel::setSyncBadges(const QHash<QString, QString>& badges,
+                                    const QHash<QString, QString>& tooltips)
+{
+    if (badges == m_badges && tooltips == m_badgeTooltips)
+        return;
+
+    m_badges        = badges;
+    m_badgeTooltips = tooltips;
+    refreshAllRows();
+}
+
+void FolderTreeModel::refreshAllRows(const QModelIndex& parent)
+{
+    const int rows = rowCount(parent);
+    if (rows == 0)
+        return;
+
+    emit dataChanged(index(0, 0, parent), index(rows - 1, 0, parent),
+                     {Qt::DisplayRole, Qt::ToolTipRole});
+    for (int row = 0; row < rows; ++row)
+        refreshAllRows(index(row, 0, parent));
 }
 
 QModelIndex FolderTreeModel::index(int row, int column, const QModelIndex& parent) const

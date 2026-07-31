@@ -27,7 +27,8 @@ public:
 private:
     void drawBackground(QPainter* p, const QRect& rect, bool selected, bool hovered) const;
     void drawIcon      (QPainter* p, const QRect& iconRect, const QPixmap& thumb) const;
-    void drawPrimaryText(QPainter* p, const QRect& r, const QString& name) const;
+    void drawPrimaryText(QPainter* p, const QRect& r, const QString& name,
+                         bool struckThrough) const;
     void drawSecondaryText(QPainter* p, const QRect& r, const QString& folder,
                            const QString& date) const;
     void drawTagPills  (QPainter* p, int x, int y, const QStringList& tags,

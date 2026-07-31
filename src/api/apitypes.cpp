@@ -199,6 +199,18 @@ ApiUploadResult ApiUploadResult::fromJson(const QJsonObject& obj)
     return result;
 }
 
+ApiRemoteEvent ApiRemoteEvent::fromJson(const QJsonObject& obj)
+{
+    ApiRemoteEvent event;
+    event.type    = obj.value(QStringLiteral("type")).toString();
+    event.groupId = obj.value(QStringLiteral("group_id")).toInt(-1);
+    event.fileId  = obj.value(QStringLiteral("file_id")).toInt(-1);
+    event.noteId  = obj.value(QStringLiteral("note_id")).toInt(-1);
+    event.tagId   = obj.value(QStringLiteral("tag_id")).toInt(-1);
+    event.actorId = obj.value(QStringLiteral("actor_id")).toInt(-1);
+    return event;
+}
+
 ApiServerInfo ApiServerInfo::fromJson(const QJsonObject& obj)
 {
     ApiServerInfo info;

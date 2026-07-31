@@ -344,13 +344,63 @@ void MainWindow::initMenuBar() {
 
 void MainWindow::initStatusBar() {
   m_statusLabel = new QLabel(QStringLiteral("0 files"), this);
+
+  // What is happening right now, in the background. Kept apart from the scan
+  // label so a scan finishing three seconds later cannot wipe out "Removing
+  // report.pdf…" mid-removal.
+  m_activityLabel = new QLabel(this);
+  m_activityLabel->setObjectName(QStringLiteral("activityLabel"));
+
   m_scanLabel = new QLabel(this);
   m_scanLabel->setObjectName(QStringLiteral("scanLabel"));
   m_userLabel = new QLabel(QStringLiteral("Not signed in"), this);
 
+  // Being out of sync is reported, never enforced: this is a button the user
+  // may ignore indefinitely, sitting in the one place that is always visible
+  // and never in the way.
+  m_syncBanner = new QPushButton(this);
+  m_syncBanner->setObjectName(QStringLiteral("syncBanner"));
+  m_syncBanner->setFlat(true);
+  m_syncBanner->setCursor(Qt::PointingHandCursor);
+  m_syncBanner->hide();
+  connect(m_syncBanner, &QPushButton::clicked, this, [this]() {
+    const int groupId = mostOutOfSyncGroup();
+    const ApiGroup group = groupById(groupId);
+    if (!group.isValid())
+      return;
+    // Syncing from here selects the folder too, so the detail pane ends up
+    // describing the group the user just acted on.
+    const QString folder = m_db->folderForGroup(groupId);
+    if (!folder.isEmpty())
+      onFolderSelected(folder);
+    onSyncGroup();
+  });
+
   statusBar()->addWidget(m_statusLabel);
+  statusBar()->addWidget(m_activityLabel, 1);
+  statusBar()->addPermanentWidget(m_syncBanner);
   statusBar()->addPermanentWidget(m_scanLabel);
   statusBar()->addPermanentWidget(m_userLabel);
+}
+
+void MainWindow::showActivity(const QString &message, int autoClearMs) {
+  if (!m_activityLabel)
+    return;
+  m_activityLabel->setText(message);
+
+  if (autoClearMs <= 0)
+    return;
+  // Only clear if this is still the message on screen — a later activity that
+  // started in the meantime owns the label now.
+  QTimer::singleShot(autoClearMs, m_activityLabel, [this, message]() {
+    if (m_activityLabel->text() == message)
+      m_activityLabel->clear();
+  });
+}
+
+void MainWindow::clearActivity() {
+  if (m_activityLabel)
+    m_activityLabel->clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,8 +417,8 @@ void MainWindow::connectSignals() {
           &MainWindow::onAddFolderRequested);
   connect(m_folderPanel, &FolderPanel::removeFolderRequested, this,
           &MainWindow::onRemoveFolderRequested);
-  connect(m_folderPanel, &FolderPanel::folderSelected, m_proxy,
-          &SearchFilterProxy::setFolderFilter);
+  connect(m_folderPanel, &FolderPanel::folderSelected, this,
+          &MainWindow::onFolderSelected);
   connect(m_folderPanel, &FolderPanel::tagsSelected, m_proxy,
           &SearchFilterProxy::setActiveTags);
 
@@ -435,10 +485,9 @@ void MainWindow::connectSignals() {
   connect(m_api, &ApiClient::errorOccurred, this, &MainWindow::onApiError);
   connect(m_api, &ApiClient::sessionExpired, this,
           &MainWindow::onSessionExpired);
-  // Someone else changed the group's files, so this machine's ahead/behind
-  // counts are stale — the Sync button says so without anyone clicking it.
-  connect(m_api, &ApiClient::syncNeeded, this,
-          [this]() { refreshSyncCounts(true); });
+  // Someone else changed something shared, so this machine's ahead/behind
+  // counts are stale — the indicators say so without anyone clicking anything.
+  connect(m_api, &ApiClient::remoteEvent, this, &MainWindow::onRemoteEvent);
 
   // Tag model changes → refresh folder panel chips
   connect(m_tagModel, &QAbstractItemModel::modelReset, m_folderPanel,
@@ -582,6 +631,8 @@ void MainWindow::onRemoveFolderRequested(const QString &path) {
     m_notes.clear();
     m_members.clear();
   }
+  if (m_selectedFolderPath.startsWith(path))
+    m_selectedFolderPath.clear();
 
   if (dropGroups) {
     const int myId = m_api->currentUser().id;
@@ -592,6 +643,8 @@ void MainWindow::onRemoveFolderRequested(const QString &path) {
   }
 
   refreshDetailPane();
+  // These folders no longer have anything to be behind on.
+  refreshAllSyncCounts(true);
 }
 
 void MainWindow::onFileActivated(const QString &filePath) {
@@ -605,6 +658,25 @@ void MainWindow::onFileSelected(const QString &filePath) {
   refreshDetailPane();
   if (m_rightTabs)
     m_rightTabs->setCurrentIndex(0);
+}
+
+void MainWindow::onFolderSelected(const QString &folderPath) {
+  m_proxy->setFolderFilter(folderPath);
+  m_selectedFolderPath = folderPath;
+
+  // Picking a folder means asking about *that* folder, so a file selected
+  // somewhere else must stop deciding which group is shown. A file inside the
+  // folder is left alone: it names the same group and carries notes with it.
+  if (!m_selectedFilePath.isEmpty()) {
+    const QString fileFolder = groupFolderFor(m_selectedFilePath);
+    if (folderPath.isEmpty() || fileFolder != folderPath) {
+      m_selectedFilePath.clear();
+      m_notes.clear();
+      m_members.clear();
+    }
+  }
+
+  refreshDetailPane();
 }
 
 void MainWindow::onEditTagsRequested(const QString &filePath) {
@@ -676,6 +748,15 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
   const PdfFile file = m_pdfModel->fileByPath(filePath);
   if (!file.isValid())
     return;
+
+  // Asking twice for the same file would send a second removal for something
+  // already on its way out, and the second one would fail with "no such file".
+  if (m_removingFiles.contains(filePath)) {
+    showActivity(QStringLiteral("'%1' is already being removed…")
+                     .arg(file.fileName),
+                 4000);
+    return;
+  }
 
   const QString folderPath = groupFolderFor(filePath);
   const int groupId = groupIdForFolder(folderPath);
@@ -777,16 +858,33 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
 
   const bool alsoPurge = purge->isChecked();
   const bool alsoDeleteLocal = deleteLocal->isChecked();
+  const QString fileName = file.fileName;
+
+  // From here on nothing waits. The row is marked as on its way out, the status
+  // bar says so, and the user is free to select other files, search, or start a
+  // removal somewhere else while this one is in flight.
+  m_removingFiles.insert(filePath);
+  m_pdfModel->setPendingRemoval(filePath, true);
+  showActivity(
+      QStringLiteral("Removing %1 from %2…").arg(fileName, group.name));
+
+  // Whichever way it ends, the mark has to come off — otherwise the row stays
+  // greyed out forever and the file can never be removed again.
+  const auto finished = [this, filePath](const QString &status, int clearAfter) {
+    m_removingFiles.remove(filePath);
+    m_pdfModel->setPendingRemoval(filePath, false);
+    showActivity(status, clearAfter);
+  };
 
   m_api->removeFile(
       groupId, remoteFileId, alsoPurge,
-      [this, groupId, hash, filePath, alsoDeleteLocal](
+      [this, groupId, hash, filePath, fileName, alsoDeleteLocal, finished](
           const ApiFileRemoval &result) {
         // The cached id points at a link that no longer exists; leaving it
         // would make the next sync think the file is still registered.
         m_db->forgetRemoteFile(groupId, hash);
 
-        QString message = result.message;
+        QString status = QStringLiteral("✓ Removed %1").arg(fileName);
         if (alsoDeleteLocal) {
           if (QFile::remove(filePath)) {
             m_pdfModel->removeFile(filePath);
@@ -795,18 +893,35 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
               m_selectedFilePath.clear();
               m_notes.clear();
             }
-            message += QStringLiteral("\n\nYour local copy was deleted.");
           } else {
-            message += QStringLiteral(
-                "\n\nYour local copy could not be deleted — check the file's "
-                "permissions. It will be added back to the group on the next "
-                "scan.");
+            // Worth interrupting for: the file is still on disk, so the next
+            // scan hands it straight back to the group and the removal the user
+            // asked for quietly undoes itself.
+            QMessageBox::warning(
+                this, QStringLiteral("Local Copy Kept"),
+                QStringLiteral(
+                    "'%1' was removed from the group, but your local copy "
+                    "could not be deleted — check the file's permissions.\n\n"
+                    "It will be added back to the group on the next scan.")
+                    .arg(fileName));
+            status = QStringLiteral("⚠ %1 removed, local copy kept")
+                         .arg(fileName);
           }
         }
 
-        QMessageBox::information(this, QStringLiteral("File Removed"), message);
+        finished(status, 6000);
+        if (result.purged) {
+          showActivity(QStringLiteral("✓ Removed %1 and deleted its stored copy")
+                           .arg(fileName),
+                       6000);
+        }
+
         reloadGroups([this]() { refreshDetailPane(); });
-        refreshSyncCounts(true);
+        refreshAllSyncCounts(true);
+      },
+      [this, fileName, finished](const ApiError &error) {
+        finished(QStringLiteral("⚠ %1 was not removed").arg(fileName), 8000);
+        showError(error);
       });
 }
 
@@ -891,6 +1006,10 @@ void MainWindow::onSignedIn() {
     // different account — get their groups now.
     reconcileFolderGroups();
     refreshDetailPane();
+    // Whatever happened while this machine was away shows up here: every
+    // folder gets counted, so the sidebar says which ones are behind before
+    // the user clicks anything.
+    refreshAllSyncCounts(true);
   });
 }
 
@@ -921,9 +1040,16 @@ void MainWindow::onSignOut() {
   m_members.clear();
   m_foldersTracking.clear();
 
+  // Counts describe an account's groups; signed out there is nothing they could
+  // be true about, so the badges and the banner go with them.
+  m_syncCounts.clear();
+  m_syncStale.clear();
+  m_syncInFlight.clear();
+
   m_userLabel->setText(QStringLiteral("Not signed in"));
   setCollaborationEnabled(false);
   refreshDetailPane();
+  updateSyncIndicators();
 }
 
 void MainWindow::onSessionExpired() {
@@ -934,6 +1060,54 @@ void MainWindow::onSessionExpired() {
 }
 
 void MainWindow::onApiError(const ApiError &error) { showError(error); }
+
+void MainWindow::onRemoteEvent(const ApiRemoteEvent &event) {
+  if (event.groupId < 0)
+    return;
+
+  // Whatever else it was, the group moved, so its counts are no longer a fact.
+  markSyncPending(event.groupId);
+
+  const bool isActiveGroup = event.groupId == activeGroupId();
+  const bool byMe = event.actorId == m_api->currentUser().id;
+
+  // A vocabulary change is global to the sidebar — the chips are one union
+  // drawn from every group — so it is reloaded whichever group it happened in.
+  if (event.touchesTags()) {
+    reloadTagVocabulary();
+    if (isActiveGroup)
+      refreshDetailPane();
+  }
+
+  if (event.touchesNotes() && isActiveGroup) {
+    // Only worth re-fetching if the note is about the file being looked at.
+    // refreshNotes() works that out from the selection, so the check here is
+    // just to avoid a request for a note attached to some other file.
+    const int shownFileId = m_db->remoteFileId(
+        event.groupId, contentHashFor(m_selectedFilePath));
+    if (event.fileId < 0 || event.fileId == shownFileId)
+      refreshNotes();
+  }
+
+  if (event.touchesFiles()) {
+    // The file list a group holds is what group.fileCount reports, and the
+    // detail pane prints it.
+    reloadGroups([this]() { refreshGroupHeader(); });
+
+    // Someone else adding a file is exactly the case worth saying out loud:
+    // nothing on this machine changed, so without this the folder would just
+    // quietly start being behind.
+    if (!byMe && event.type == QLatin1String(ApiRemoteEvent::FileRegistered)) {
+      const ApiGroup group = groupById(event.groupId);
+      if (group.isValid()) {
+        showActivity(
+            QStringLiteral("A file was added to '%1' — sync to download it")
+                .arg(group.name),
+            10000);
+      }
+    }
+  }
+}
 
 void MainWindow::showError(const ApiError &error) {
   QMessageBox box(this);
@@ -1169,10 +1343,22 @@ void MainWindow::trackFilesIn(int groupId, const QString &folderPath) {
     pending << filePath;
   }
 
+  // Files this machine holds that the group has never been told about. They are
+  // not registered here on purpose — that is a sync's job, and a sync is the
+  // user's decision. What happens now is only that the folder starts saying so.
+  //
+  // The group named is the one the *files* are in, not whatever happens to be
+  // selected: a PDF dropped into a folder nobody is looking at still has to
+  // light that folder up.
+  markSyncPending(groupId);
+
   if (pending.isEmpty())
     return;
 
-  markSyncPending();
+  showActivity(QStringLiteral("%1 new file(s) in %2 — sync to share them")
+                   .arg(pending.size())
+                   .arg(groupNameForFolder(folderPath)),
+               8000);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1233,85 +1419,231 @@ MainWindow::SyncPlan MainWindow::planSync(int groupId,
   return plan;
 }
 
-void MainWindow::refreshSyncCounts(bool force) {
-  if (!m_syncBtn)
-    return;
+// Deliberately git's vocabulary: ↑ is what this machine owes the group, ↓ is
+// what the group owes this machine.
+QString MainWindow::SyncCounts::badge() const {
+  QStringList parts;
+  if (uploads > 0)
+    parts << QStringLiteral("↑%1").arg(uploads);
+  if (downloads > 0)
+    parts << QStringLiteral("↓%1").arg(downloads);
+  // Tag and note edits have no count worth a number next to a folder name; a
+  // dot is enough to say "there is something to send".
+  if (parts.isEmpty() && pendingMeta > 0)
+    parts << QStringLiteral("•");
+  return parts.join(QLatin1Char(' '));
+}
 
-  const int groupId = activeGroupId();
-  if (groupId < 0 || !m_api->isAuthenticated()) {
-    m_syncCountsGroupId = -1;
-    m_syncUploads = m_syncDownloads = m_syncPendingMeta = 0;
-    updateSyncButton();
-    return;
+QString MainWindow::SyncCounts::describe() const {
+  QStringList lines;
+  if (uploads > 0) {
+    lines << QStringLiteral("↑ %1 file(s) to upload — held here, not stored "
+                            "for the group yet")
+                 .arg(uploads);
   }
+  if (downloads > 0) {
+    lines << QStringLiteral("↓ %1 file(s) to download — stored for the group, "
+                            "missing from this folder")
+                 .arg(downloads);
+  }
+  if (pendingMeta > 0) {
+    lines << QStringLiteral("• %1 file(s) with tag or note changes to send")
+                 .arg(pendingMeta);
+  }
+  if (lines.isEmpty()) {
+    lines << (known ? QStringLiteral(
+                          "This folder and the group hold the same files.")
+                    : QStringLiteral("Not counted yet."));
+  }
+  return lines.join(QLatin1Char('\n'));
+}
 
-  // refreshDetailPane() runs on every selection change, so the counts are only
-  // re-fetched when they could actually have moved: a different group, or
-  // something local that says so.
-  if (!force && groupId == m_syncCountsGroupId)
-    return;
-  if (m_syncCountsInFlight)
+MainWindow::SyncCounts MainWindow::countsFor(int groupId) const {
+  return m_syncCounts.value(groupId);
+}
+
+void MainWindow::refreshSyncCounts(bool force) {
+  refreshSyncCountsFor(activeGroupId(), force);
+  updateSyncButton();
+}
+
+void MainWindow::refreshSyncCountsFor(int groupId, bool force) {
+  if (groupId < 0 || !m_api->isAuthenticated())
     return;
 
-  m_syncCountsInFlight = true;
+  // refreshDetailPane() runs on every selection change, so a group is only
+  // re-counted when the answer could actually have moved: the first time it is
+  // asked about, or after something said the counts went stale.
+  const bool known = m_syncCounts.value(groupId).known;
+  if (!force && known && !m_syncStale.contains(groupId))
+    return;
+  // One request per group at a time. A scan finishing can mark a dozen folders
+  // stale at once, and each of them re-entering here must not stack up round
+  // trips for a question already being asked.
+  if (m_syncInFlight.contains(groupId))
+    return;
+
+  m_syncInFlight.insert(groupId);
+  m_syncStale.remove(groupId);
   m_api->syncStatus(
       groupId,
       [this, groupId](const ApiSyncStatus &status) {
-        m_syncCountsInFlight = false;
-        // The selection may have moved to another group while this was in
-        // flight; those counts would be a lie about the group now shown.
-        if (activeGroupId() != groupId)
+        m_syncInFlight.remove(groupId);
+
+        // The group may have been dropped while this was in flight — its folder
+        // unwatched, or its membership left — and counts for a group we no
+        // longer have a folder for would badge nothing.
+        if (!groupById(groupId).isValid()) {
+          m_syncCounts.remove(groupId);
+          updateSyncIndicators();
           return;
+        }
+
         const SyncPlan plan = planSync(groupId, status);
-        m_syncCountsGroupId = groupId;
-        m_syncUploads = plan.uploads();
-        m_syncDownloads = plan.downloads();
-        m_syncPendingMeta = plan.pendingMetadata;
+        SyncCounts counts;
+        counts.uploads = plan.uploads();
+        counts.downloads = plan.downloads();
+        counts.pendingMeta = plan.pendingMetadata;
+        counts.known = true;
+        m_syncCounts.insert(groupId, counts);
+
         updateSyncButton();
+        updateSyncIndicators();
       },
-      [this](const ApiError &) {
-        // An unreachable server is not worth a modal here — the button simply
-        // keeps whatever it last knew, and Sync itself will report the failure.
-        m_syncCountsInFlight = false;
+      [this, groupId](const ApiError &) {
+        // An unreachable server is not worth a modal here — the indicators keep
+        // whatever they last knew, and Sync itself will report the failure.
+        // The group stays stale so the next prompt tries again.
+        m_syncInFlight.remove(groupId);
+        m_syncStale.insert(groupId);
       });
+}
+
+void MainWindow::refreshAllSyncCounts(bool force) {
+  if (!m_api->isAuthenticated())
+    return;
+
+  // Every directory with a group, whether or not anything in it is selected —
+  // the sidebar badges exist precisely to speak for the ones that are not.
+  QSet<int> live;
+  for (const QString &folder : m_db->mappedFolders()) {
+    const int groupId = groupIdForFolder(folder);
+    if (groupId < 0)
+      continue;
+    live.insert(groupId);
+    refreshSyncCountsFor(groupId, force);
+  }
+
+  // Counts for a group that no longer has a folder here would badge a folder
+  // that is gone and keep the banner offering to sync it.
+  for (const int groupId : m_syncCounts.keys()) {
+    if (!live.contains(groupId))
+      m_syncCounts.remove(groupId);
+  }
+
+  updateSyncIndicators();
 }
 
 void MainWindow::updateSyncButton() {
   if (!m_syncBtn)
     return;
 
-  // Deliberately git's vocabulary: ↑ is what this machine owes the group, ↓ is
-  // what the group owes this machine.
-  QString label = QStringLiteral("Sync");
-  if (m_syncUploads > 0)
-    label += QStringLiteral(" ↑%1").arg(m_syncUploads);
-  if (m_syncDownloads > 0)
-    label += QStringLiteral(" ↓%1").arg(m_syncDownloads);
-  if (m_syncPendingMeta > 0 && m_syncUploads == 0 && m_syncDownloads == 0)
-    label += QStringLiteral(" •");
-  m_syncBtn->setText(label);
-
-  QStringList lines;
-  if (m_syncUploads > 0) {
-    lines << QStringLiteral("↑ %1 file(s) to upload — held here, not stored "
-                            "for the group yet")
-                 .arg(m_syncUploads);
-  }
-  if (m_syncDownloads > 0) {
-    lines << QStringLiteral("↓ %1 file(s) to download — stored for the group, "
-                            "missing from this folder")
-                 .arg(m_syncDownloads);
-  }
-  if (m_syncPendingMeta > 0) {
-    lines << QStringLiteral("• %1 file(s) with tag or note changes to send")
-                 .arg(m_syncPendingMeta);
-  }
-  if (lines.isEmpty())
-    lines << QStringLiteral("This folder and the group hold the same files.");
-  m_syncBtn->setToolTip(lines.join(QLatin1Char('\n')));
+  const SyncCounts counts = countsFor(activeGroupId());
+  const QString badge = counts.badge();
+  m_syncBtn->setText(badge.isEmpty() ? QStringLiteral("Sync")
+                                     : QStringLiteral("Sync %1").arg(badge));
+  m_syncBtn->setToolTip(counts.describe());
 }
 
-void MainWindow::markSyncPending() { refreshSyncCounts(true); }
+int MainWindow::mostOutOfSyncGroup() const {
+  // Downloads win over uploads: a file the group has and this machine does not
+  // is the case a member cannot discover any other way — their folder simply
+  // looks complete. Being ahead is at least visible on disk.
+  int best = -1;
+  int bestScore = 0;
+  for (auto it = m_syncCounts.constBegin(); it != m_syncCounts.constEnd(); ++it) {
+    const SyncCounts &counts = it.value();
+    const int score =
+        counts.downloads * 1000 + counts.uploads * 10 + counts.pendingMeta;
+    if (score > bestScore) {
+      bestScore = score;
+      best = it.key();
+    }
+  }
+  return best;
+}
+
+void MainWindow::updateSyncIndicators() {
+  // ── Sidebar badges ────────────────────────────────────────────────────────
+  QHash<QString, QString> badges;
+  QHash<QString, QString> tooltips;
+  for (const QString &folder : m_db->mappedFolders()) {
+    const int groupId = groupIdForFolder(folder);
+    if (groupId < 0)
+      continue;
+    const SyncCounts counts = countsFor(groupId);
+    const QString badge = counts.badge();
+    if (badge.isEmpty())
+      continue;
+    badges.insert(folder, badge);
+    tooltips.insert(folder, counts.describe());
+  }
+  m_folderTreeModel->setSyncBadges(badges, tooltips);
+
+  // ── Status-bar banner ─────────────────────────────────────────────────────
+  if (!m_syncBanner)
+    return;
+
+  const int groupId = mostOutOfSyncGroup();
+  const ApiGroup group = groupById(groupId);
+  if (groupId < 0 || !group.isValid()) {
+    m_syncBanner->hide();
+    setWindowTitle(QStringLiteral("PDF Organizer"));
+    return;
+  }
+
+  const SyncCounts counts = countsFor(groupId);
+  QStringList parts;
+  if (counts.downloads > 0)
+    parts << QStringLiteral("↓%1 to download").arg(counts.downloads);
+  if (counts.uploads > 0)
+    parts << QStringLiteral("↑%1 to upload").arg(counts.uploads);
+  if (parts.isEmpty() && counts.pendingMeta > 0)
+    parts << QStringLiteral("tag/note changes to send");
+
+  // How many *other* groups are also behind, so one busy folder does not hide
+  // the fact that three of them need attention.
+  int alsoWaiting = 0;
+  for (auto it = m_syncCounts.constBegin(); it != m_syncCounts.constEnd(); ++it) {
+    if (it.key() != groupId && !it.value().inSync())
+      ++alsoWaiting;
+  }
+
+  QString text = QStringLiteral("%1 in '%2'")
+                     .arg(parts.join(QStringLiteral(", ")), group.name);
+  if (alsoWaiting > 0)
+    text += QStringLiteral(" (+%1 more folder(s))").arg(alsoWaiting);
+
+  m_syncBanner->setText(text);
+  m_syncBanner->setToolTip(
+      QStringLiteral("%1\n\nClick to sync '%2' now. Nothing is transferred "
+                     "until you do.")
+          .arg(counts.describe(), group.name));
+  m_syncBanner->show();
+
+  // Marked in the title so a minimised window still says there is something
+  // waiting.
+  setWindowTitle(QStringLiteral("PDF Organizer  •"));
+}
+
+void MainWindow::markSyncPending() { markSyncPending(activeGroupId()); }
+
+void MainWindow::markSyncPending(int groupId) {
+  if (groupId < 0)
+    return;
+  m_syncStale.insert(groupId);
+  refreshSyncCountsFor(groupId, false);
+}
 
 void MainWindow::registerNext(const QString &folderPath, int groupId,
                               QStringList pending) {
@@ -1427,8 +1759,24 @@ void MainWindow::resolveRemoteFile(
       onFailed); // empty → ApiClient falls back to the modal
 }
 
+QString MainWindow::activeFolderPath() const {
+  // A selected file is the most specific answer: it names one directory, and
+  // that directory is one group.
+  const QString fileFolder = groupFolderFor(m_selectedFilePath);
+  if (groupIdForFolder(fileFolder) >= 0)
+    return fileFolder;
+
+  // Otherwise the folder clicked in the sidebar decides. This is what keeps a
+  // group reachable after its last local file is gone: the directory → group
+  // mapping outlives the files, so the folder can still be selected, synced,
+  // and its PDFs pulled back down — no share code needed.
+  if (!m_selectedFolderPath.isEmpty())
+    return m_selectedFolderPath;
+  return fileFolder;
+}
+
 int MainWindow::activeGroupId() const {
-  return groupIdForFolder(groupFolderFor(m_selectedFilePath));
+  return groupIdForFolder(activeFolderPath());
 }
 
 ApiGroup MainWindow::activeGroup() const { return groupById(activeGroupId()); }
@@ -1468,10 +1816,56 @@ void MainWindow::onAddNote() {
   if (!f.isValid())
     return;
 
-  m_db->savePendingNote(f.id, body);
+  const QString filePath = m_selectedFilePath;
+  const int localFileId = f.id;
+
+  // The editor empties as soon as the note is taken, so the user can carry on
+  // typing the next one. Nothing can lose the text after this point: every
+  // failure path below queues it locally rather than dropping it.
   m_noteEdit->clear();
-  refreshNotes();
-  markSyncPending();
+
+  // Keep it on this machine instead of sending it. Signed out, or a file this
+  // group has never been told about — either way there is nothing to attach a
+  // note to yet, and the next sync is what turns it into a real one.
+  const auto queue = [this, localFileId, body, groupId]() {
+    m_db->savePendingNote(localFileId, body);
+    refreshNotes();
+    markSyncPending(groupId);
+    showActivity(
+        QStringLiteral("Note saved on this machine — it goes up on the next "
+                       "sync"),
+        6000);
+  };
+
+  if (!m_api->isAuthenticated()) {
+    queue();
+    return;
+  }
+
+  // Registering the file if this is the first thing ever attached to it is the
+  // point: a note on a file the group has not been told about has nowhere to
+  // live, and the user should not have to know that.
+  resolveRemoteFile(
+      groupId, filePath,
+      [this, groupId, filePath, body, queue](int remoteFileId) {
+        m_api->createNote(
+            groupId, remoteFileId, body,
+            [this, filePath](const ApiNote &) {
+              // Straight back from the server, so the note appears with its
+              // real author and timestamp rather than a local guess.
+              if (filePath == m_selectedFilePath)
+                refreshNotes();
+              showActivity(QStringLiteral("✓ Note added"), 4000);
+            },
+            [this, queue](const ApiError &error) {
+              // The note is not lost because the network was: it goes into the
+              // same queue an offline note would.
+              queue();
+              if (!error.isNetworkFailure())
+                showError(error);
+            });
+      },
+      [this, queue](const ApiError &) { queue(); });
 }
 
 void MainWindow::refreshNotes() {
@@ -1484,8 +1878,24 @@ void MainWindow::refreshNotes() {
 
   const int groupId = activeGroupId();
   const PdfFile file = m_pdfModel->fileByPath(m_selectedFilePath);
-  if (groupId < 0 || !file.isValid() || !m_api->isAuthenticated()) {
+  if (!file.isValid()) {
     m_notes.clear();
+    m_notesLayout->addStretch();
+    return;
+  }
+
+  // Notes written while offline are shown from the local queue, whatever the
+  // server does or does not have. They are the ones most easily believed lost,
+  // so they are the ones that must always be on screen.
+  const QStringList queued = m_db->getPendingNotes(file.id);
+  const auto drawQueued = [this, queued]() {
+    for (const QString &body : queued)
+      m_notesLayout->addWidget(buildQueuedNoteBubble(body));
+  };
+
+  if (groupId < 0 || !m_api->isAuthenticated()) {
+    m_notes.clear();
+    drawQueued();
     m_notesLayout->addStretch();
     return;
   }
@@ -1494,33 +1904,73 @@ void MainWindow::refreshNotes() {
   const int remoteFileId =
       hash.isEmpty() ? -1 : m_db->remoteFileId(groupId, hash);
   if (remoteFileId < 0) {
-    // Not registered in this group yet — there cannot be notes, and we should
-    // not register a file just because it was clicked on.
+    // Not registered in this group yet — the server cannot have notes for it,
+    // and we should not register a file just because it was clicked on.
     m_notes.clear();
+    drawQueued();
     m_notesLayout->addStretch();
     return;
   }
 
   const QString pathAtRequest = m_selectedFilePath;
-  m_api->listNotes(groupId, remoteFileId,
-                   [this, pathAtRequest, groupId,
-                    remoteFileId](const QList<ApiNote> &notes) {
-                     // The user may have clicked elsewhere while this was in
-                     // flight.
-                     if (pathAtRequest != m_selectedFilePath)
-                       return;
+  m_api->listNotes(
+      groupId, remoteFileId,
+      [this, pathAtRequest, drawQueued](const QList<ApiNote> &notes) {
+        // The user may have clicked elsewhere while this was in flight.
+        if (pathAtRequest != m_selectedFilePath)
+          return;
 
-                     m_notes = notes;
-                     while (QLayoutItem *item = m_notesLayout->takeAt(0)) {
-                       delete item->widget();
-                       delete item;
-                     }
+        m_notes = notes;
+        while (QLayoutItem *item = m_notesLayout->takeAt(0)) {
+          delete item->widget();
+          delete item;
+        }
 
-                     for (const ApiNote &note : m_notes)
-                       m_notesLayout->addWidget(buildNoteBubble(note));
+        for (const ApiNote &note : m_notes)
+          m_notesLayout->addWidget(buildNoteBubble(note));
+        // Queued notes sit after the real ones: they are the newest, and they
+        // are the ones still waiting to become real.
+        drawQueued();
 
-                     m_notesLayout->addStretch();
-                   });
+        m_notesLayout->addStretch();
+      },
+      [this, pathAtRequest, drawQueued](const ApiError &) {
+        // An unreachable server should not hide the notes this machine wrote.
+        if (pathAtRequest != m_selectedFilePath)
+          return;
+        m_notes.clear();
+        drawQueued();
+        m_notesLayout->addStretch();
+      });
+}
+
+QWidget *MainWindow::buildQueuedNoteBubble(const QString &body) {
+  auto *bubble = new QWidget;
+  bubble->setObjectName(QStringLiteral("queuedNoteBubble"));
+  bubble->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Minimum);
+  auto *bl = new QVBoxLayout(bubble);
+  bl->setContentsMargins(10, 8, 10, 8);
+  bl->setSpacing(6);
+
+  auto *header = new QLabel(QStringLiteral("You · not synced yet"), bubble);
+  QFont hfont = header->font();
+  hfont.setBold(true);
+  header->setFont(hfont);
+  header->setStyleSheet(QStringLiteral("color: #d0a24c; font-size: 9pt;"));
+  header->setToolTip(
+      QStringLiteral("Written on this machine and not sent yet. Sync this "
+                     "folder to share it with the group."));
+  bl->addWidget(header);
+
+  auto *text = new QLabel(body, bubble);
+  text->setWordWrap(true);
+  text->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  bl->addWidget(text);
+
+  bubble->setStyleSheet(QStringLiteral(
+      "QWidget#queuedNoteBubble { background: rgba(208,162,76,0.08); border: 1px "
+      "dashed rgba(208,162,76,0.35); border-radius: 8px; }"));
+  return bubble;
 }
 
 QWidget *MainWindow::buildNoteBubble(const ApiNote &note) {
@@ -2144,7 +2594,7 @@ void MainWindow::runSync(int groupId, const ApiGroup &group,
         QStringLiteral("'%1' is up to date. Every file the group stores is in "
                        "this folder, and every file in this folder is stored.")
             .arg(group.name));
-    refreshSyncCounts(true);
+    refreshAllSyncCounts(true);
     return;
   }
 
@@ -2184,7 +2634,7 @@ void MainWindow::runSync(int groupId, const ApiGroup &group,
       if (downloaded > 0)
         m_watcher->rescanAll();
 
-      refreshSyncCounts(true);
+      refreshAllSyncCounts(true);
       refreshDetailPane();
     };
 
@@ -2450,6 +2900,10 @@ void MainWindow::onScanFinished(const QString &folder) {
   // it is also when their groups get created and their files registered.
   // Anything already known to the backend is skipped, so a rescan is cheap.
   reconcileFoldersUnder(folder);
+
+  // A scan is the only way a file appearing or disappearing on disk is ever
+  // noticed, so it is also the moment the counts stop being trustworthy.
+  refreshAllSyncCounts(true);
 }
 
 QWidget *MainWindow::buildDetailPane() {
@@ -2669,7 +3123,7 @@ void MainWindow::refreshGroupHeader() {
     return;
 
   const bool online = m_api && m_api->isAuthenticated();
-  const QString folder = groupFolderFor(m_selectedFilePath);
+  const QString folder = activeFolderPath();
   const ApiGroup group = activeGroup();
 
   // The toolbar and the detail pane name the same thing, so they are filled in
@@ -2685,11 +3139,11 @@ void MainWindow::refreshGroupHeader() {
     return;
   }
 
-  if (m_selectedFilePath.isEmpty() || folder.isEmpty()) {
-    m_groupHeader->setText(QStringLiteral("No file selected"));
-    m_groupMeta->setText(QStringLiteral(
-        "A file's group is the directory it sits in. Select a file to see its "
-        "group."));
+  if (folder.isEmpty()) {
+    m_groupHeader->setText(QStringLiteral("Nothing selected"));
+    m_groupMeta->setText(
+        QStringLiteral("A group is a directory. Select a folder or a file to "
+                       "see its group."));
     m_groupLabel->setText(QStringLiteral("—"));
     return;
   }
@@ -3018,6 +3472,20 @@ void MainWindow::applyDarkTheme(bool enabled) {
 
         /* ── Scan label ── */
         QLabel#scanLabel { color: #3a8a3a; font-size: 8pt; }
+
+        /* ── Background activity ── */
+        QLabel#activityLabel { color: #9fb3ff; font-size: 8pt; }
+
+        /* ── "You are out of sync" banner ── */
+        QPushButton#syncBanner {
+            background: #2b4060;
+            border: 1px solid #4d8eff;
+            border-radius: 9px;
+            padding: 1px 10px;
+            color: #9fb3ff;
+            font-size: 8pt;
+        }
+        QPushButton#syncBanner:hover { background: #35507a; color: #cfe0ff; }
     )"));
 }
 

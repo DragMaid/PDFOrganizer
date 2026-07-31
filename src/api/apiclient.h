@@ -178,7 +178,12 @@ signals:
     /// The refresh token is gone or rejected; the user must sign in again.
     void sessionExpired();
     void authenticatedChanged(bool authenticated);
+    /// Something in some group this user belongs to changed. Emitted for every
+    /// event, including ones remoteEvent() describes in more detail.
     void syncNeeded();
+    /// The same change, named: which group, which file, and who did it. Use it
+    /// to refresh only the part of the UI the event actually touches.
+    void remoteEvent(const ApiRemoteEvent& event);
 
 private:
     using RawHandler = std::function<void(const QJsonDocument&)>;

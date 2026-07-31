@@ -1,6 +1,7 @@
 #pragma once
 #include <QAbstractListModel>
 #include <QAbstractItemModel>
+#include <QHash>
 #include <QStringList>
 
 /**
@@ -61,6 +62,13 @@ public:
 
     [[nodiscard]] QString folderPathForIndex(const QModelIndex& index) const;
 
+    /// How far each directory's group is out of sync, as a short suffix drawn
+    /// after the folder's name ("↓3", "↑1 ↓2"). MainWindow owns the counting;
+    /// this model only knows how to show the answer. Paths with no entry get
+    /// no suffix, which is what an up-to-date folder looks like.
+    void setSyncBadges(const QHash<QString, QString>& badges,
+                       const QHash<QString, QString>& tooltips);
+
 signals:
     void folderAdded  (const QString& path);
     void folderRemoved(const QString& path);
@@ -76,6 +84,11 @@ private:
     void buildTreeForRoot(FolderNode* root, const QString& rootPath);
     void clearTree();
     FolderNode* nodeFromIndex(const QModelIndex& index) const;
+    /// Repaint every row; badges can change on any node at once, and the tree
+    /// is small enough that finding the individual indices is not worth it.
+    void refreshAllRows(const QModelIndex& parent = {});
 
     QList<FolderNode*> m_roots;
+    QHash<QString, QString> m_badges;        ///< absolute path → "↑1 ↓2"
+    QHash<QString, QString> m_badgeTooltips; ///< absolute path → what it means
 };

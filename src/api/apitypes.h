@@ -187,6 +187,48 @@ struct ApiUploadResult
     static ApiUploadResult fromJson(const QJsonObject& obj);
 };
 
+/**
+ * @brief One change another member made, pushed over the WebSocket.
+ *
+ * Events carry no content — only what changed and where. The client re-fetches
+ * whatever it happens to be showing, which is why a session that was offline
+ * while things happened recovers on its next reload rather than needing the
+ * events it missed.
+ *
+ * @p actorId is whoever caused it, and it may well be the signed-in user: the
+ * same account on a second machine gets the event too, and wants it.
+ */
+struct ApiRemoteEvent
+{
+    QString type;           ///< "note_created", "file_registered", …
+    int     groupId = -1;
+    int     fileId  = -1;   ///< -1 when the change was not about one file
+    int     noteId  = -1;
+    int     tagId   = -1;
+    int     actorId = -1;
+
+    // Types worth branching on. Anything else still counts as "this group
+    // moved", which is all the sync indicators need.
+    static constexpr auto FileRegistered  = "file_registered";
+    static constexpr auto FileRemoved     = "file_removed";
+    static constexpr auto FileUploaded    = "file_uploaded";
+    static constexpr auto NoteCreated     = "note_created";
+    static constexpr auto NoteUpdated     = "note_updated";
+    static constexpr auto NoteDeleted     = "note_deleted";
+    static constexpr auto FileTagsChanged = "file_tags_changed";
+
+    [[nodiscard]] bool isValid() const { return !type.isEmpty(); }
+    /// True for anything that changes the group's tag vocabulary or a file's
+    /// tags — the sidebar chips are rebuilt from scratch either way.
+    [[nodiscard]] bool touchesTags() const { return type.startsWith(QLatin1String("tag_")) ||
+                                                    type == QLatin1String(FileTagsChanged); }
+    [[nodiscard]] bool touchesNotes() const { return type.startsWith(QLatin1String("note_")); }
+    [[nodiscard]] bool touchesFiles() const { return type.startsWith(QLatin1String("file_")) &&
+                                                     type != QLatin1String(FileTagsChanged); }
+
+    static ApiRemoteEvent fromJson(const QJsonObject& obj);
+};
+
 struct ApiServerInfo
 {
     QString status;
