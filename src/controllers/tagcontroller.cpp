@@ -114,3 +114,36 @@ bool TagController::removeTagFromFile(const QString& filePath, const QString& ta
     updated.removeAll(tag);
     return setFileTags(filePath, updated);
 }
+
+// ── Mirroring the backend ─────────────────────────────────────────────────────
+
+void TagController::applyRemoteVocabulary(const QStringList& names)
+{
+    // Rebuild the local table so tags deleted by a teammate disappear here too.
+    for (const QString& existing : m_db->loadTags()) {
+        if (!names.contains(existing, Qt::CaseInsensitive))
+            m_db->deleteTag(existing);
+    }
+    for (const QString& name : names)
+        m_db->saveTag(name);
+
+    m_tagModel->resetTags(m_db->loadTags());
+}
+
+void TagController::applyRemoteFileTags(const QString& filePath,
+                                        const QStringList& tags)
+{
+    PdfFile f = m_pdfModel->fileByPath(filePath);
+    if (!f.isValid() || f.id < 0) return;
+
+    for (const QString& t : tags)
+        if (!m_tagModel->hasTag(t))
+            createTag(t);
+
+    m_db->setFileTags(f.id, tags);
+
+    f.tags = tags;
+    m_pdfModel->updateFile(f);
+
+    emit fileTagsChanged(filePath, tags);
+}

@@ -37,7 +37,8 @@ public:
 private:
     void drawCard      (QPainter* p, const QRect& rect, bool selected, bool hovered) const;
     void drawThumbnail (QPainter* p, const QRect& thumbRect, const QPixmap& pix) const;
-    void drawFileName  (QPainter* p, const QRect& textRect, const QString& name) const;
+    void drawFileName  (QPainter* p, const QRect& textRect, const QString& name,
+                        bool struckThrough) const;
     void drawTagPills  (QPainter* p, const QRect& pillRect, const QStringList& tags) const;
 
     static QColor pillColor(const QString& tag);

@@ -38,6 +38,7 @@ QVariant PdfModel::data(const QModelIndex& index, int role) const
     case ThumbnailRole:   return QVariant::fromValue(f.thumbnail);
     case DatabaseIdRole:  return f.id;
     case PdfFileRole:     return QVariant::fromValue(f);
+    case PendingRemovalRole: return m_pendingRemoval.contains(f.filePath);
     default: break;
     }
 
@@ -94,6 +95,7 @@ QHash<int, QByteArray> PdfModel::roleNames() const
     roles[ThumbnailRole]   = "thumbnail";
     roles[DatabaseIdRole]  = "databaseId";
     roles[PdfFileRole]     = "pdfFile";
+    roles[PendingRemovalRole] = "pendingRemoval";
     return roles;
 }
 
@@ -148,6 +150,32 @@ void PdfModel::setThumbnail(const QString& filePath, const QPixmap& thumb)
     m_files[row].thumbnail = thumb;
     const QModelIndex idx = index(row, ColFileName);
     emit dataChanged(idx, idx, {ThumbnailRole, Qt::DecorationRole});
+}
+
+void PdfModel::setPendingRemoval(const QString& filePath, bool pending)
+{
+    if (m_pendingRemoval.contains(filePath) == pending)
+        return;
+
+    if (pending)
+        m_pendingRemoval.insert(filePath);
+    else
+        m_pendingRemoval.remove(filePath);
+
+    // A file whose row is already gone can still be mid-removal — the local
+    // copy may have been deleted first — so the set is updated either way and
+    // only the repaint needs a row.
+    const int row = rowForPath(filePath);
+    if (row < 0)
+        return;
+
+    emit dataChanged(index(row, 0), index(row, ColCount - 1),
+                     {PendingRemovalRole});
+}
+
+bool PdfModel::isPendingRemoval(const QString& filePath) const
+{
+    return m_pendingRemoval.contains(filePath);
 }
 
 // ── Query ─────────────────────────────────────────────────────────────────────

@@ -12,6 +12,11 @@ class DatabaseManager;
  * Every tag mutation goes through this controller so that the database,
  * the global TagModel, and the per-file tags inside PdfModel all stay
  * in sync.
+ *
+ * The backend is the authority on tags — this controller keeps a local mirror
+ * so the UI can draw without waiting on the network. Methods named
+ * `applyRemote*` write the server's answer into that mirror and are the only
+ * way tag state should change once signed in.
  */
 class TagController : public QObject
 {
@@ -40,6 +45,17 @@ public:
 
     /// Remove a single tag from a file.
     bool removeTagFromFile(const QString& filePath, const QString& tag);
+
+    // ── Mirroring the backend ─────────────────────────────────────────────────
+
+    /// Replace the local vocabulary with the tags the server reports across
+    /// every group the user belongs to.
+    void applyRemoteVocabulary(const QStringList& names);
+
+    /// Record the tag list the server confirmed for a file. Used instead of
+    /// setFileTags() once signed in, so the local copy always reflects what
+    /// actually landed — including tags a teammate added concurrently.
+    void applyRemoteFileTags(const QString& filePath, const QStringList& tags);
 
 signals:
     void tagCreated(const QString& name);

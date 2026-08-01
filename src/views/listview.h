@@ -27,9 +27,15 @@ public:
 signals:
     /// User double-clicked (or pressed Enter) on a PDF row.
     void fileActivated(const QString& filePath);
+    void fileSelected(const QString& filePath);
 
     /// User wants to assign/edit tags for this file.
     void editTagsRequested(const QString& filePath);
+
+    /// User asked to take this file out of its group. Unlike deleting the PDF
+    /// in a file manager, this is a deliberate shared-state change — MainWindow
+    /// confirms it and decides what happens to the stored and local copies.
+    void removeFileRequested(const QString& filePath);
 
     /// Request thumbnail for a file (for caching when switching to grid view).
     void thumbnailNeeded(const QString& filePath);

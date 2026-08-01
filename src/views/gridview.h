@@ -25,7 +25,11 @@ public:
 
 signals:
     void fileActivated    (const QString& filePath);
+    void fileSelected     (const QString& filePath);
     void editTagsRequested(const QString& filePath);
+    /// User asked to take this file out of its group — see ListView's own
+    /// signal; MainWindow handles both the same way.
+    void removeFileRequested(const QString& filePath);
     void thumbnailNeeded  (const QString& filePath);
 
 private slots:

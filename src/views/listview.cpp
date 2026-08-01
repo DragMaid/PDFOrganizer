@@ -10,6 +10,7 @@
 #include <QAction>
 #include <QTimer>
 #include <QScrollBar>
+#include <QItemSelectionModel>
 
 ListView::ListView(PdfModel*         model,
                    SearchFilterProxy* proxy,
@@ -69,6 +70,12 @@ void ListView::buildUi()
 
     connect(m_tableView, &QTableView::activated, this, &ListView::onActivated);
     connect(m_tableView, &QTableView::doubleClicked, this, &ListView::onActivated);
+    connect(m_tableView->selectionModel(), &QItemSelectionModel::currentRowChanged,
+            this, [this](const QModelIndex& current, const QModelIndex&) {
+                if (!current.isValid()) return;
+                const QModelIndex srcIdx = m_proxy->mapToSource(current);
+                emit fileSelected(m_model->data(srcIdx, PdfModel::FilePathRole).toString());
+            });
 
     // Request thumbnails as the user scrolls
     connect(m_tableView->verticalScrollBar(), &QScrollBar::valueChanged,
@@ -140,6 +147,11 @@ void ListView::showContextMenu(const QPoint& pos)
     QAction* openAct = menu.addAction(QStringLiteral("Open PDF"));
     menu.addSeparator();
     QAction* tagAct  = menu.addAction(QStringLiteral("Edit Tags…"));
+    menu.addSeparator();
+    QAction* removeAct = menu.addAction(QStringLiteral("Remove from Group…"));
+    removeAct->setToolTip(QStringLiteral(
+        "Take this file out of its shared group. Deleting the PDF in a file "
+        "manager does not do this."));
 
     const QAction* chosen = menu.exec(m_tableView->viewport()->mapToGlobal(pos));
     if (!chosen) return;
@@ -148,4 +160,6 @@ void ListView::showContextMenu(const QPoint& pos)
         emit fileActivated(path);
     else if (chosen == tagAct)
         emit editTagsRequested(path);
+    else if (chosen == removeAct)
+        emit removeFileRequested(path);
 }

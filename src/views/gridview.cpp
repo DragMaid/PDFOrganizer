@@ -8,6 +8,7 @@
 #include <QScrollBar>
 #include <QAction>
 #include <QTimer>
+#include <QItemSelectionModel>
 
 GridView::GridView(PdfModel*         model,
                    SearchFilterProxy* proxy,
@@ -51,6 +52,12 @@ void GridView::buildUi()
             this, &GridView::onActivated);
     connect(m_listView, &QListView::doubleClicked,
             this, &GridView::onActivated);
+    connect(m_listView->selectionModel(), &QItemSelectionModel::currentChanged,
+            this, [this](const QModelIndex& current, const QModelIndex&) {
+                if (!current.isValid()) return;
+                const QModelIndex srcIdx = m_proxy->mapToSource(current);
+                emit fileSelected(m_model->data(srcIdx, PdfModel::FilePathRole).toString());
+            });
 
     // Request thumbnails as the user scrolls
     connect(m_listView->verticalScrollBar(), &QScrollBar::valueChanged,
@@ -94,6 +101,11 @@ void GridView::showContextMenu(const QPoint& pos)
     QAction* openAct = menu.addAction(QStringLiteral("Open PDF"));
     menu.addSeparator();
     QAction* tagAct  = menu.addAction(QStringLiteral("Edit Tags…"));
+    menu.addSeparator();
+    QAction* removeAct = menu.addAction(QStringLiteral("Remove from Group…"));
+    removeAct->setToolTip(QStringLiteral(
+        "Take this file out of its shared group. Deleting the PDF in a file "
+        "manager does not do this."));
 
     const QAction* chosen = menu.exec(m_listView->viewport()->mapToGlobal(pos));
     if (!chosen) return;
@@ -102,6 +114,8 @@ void GridView::showContextMenu(const QPoint& pos)
         emit fileActivated(path);
     else if (chosen == tagAct)
         emit editTagsRequested(path);
+    else if (chosen == removeAct)
+        emit removeFileRequested(path);
 }
 
 void GridView::onViewScrolled()
