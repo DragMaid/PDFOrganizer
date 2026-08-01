@@ -1,142 +1,164 @@
+<div align="center">
+
+<img src="assets/icon.png" alt="PDF Organizer" width="128" />
+
 # PDF Organizer
 
-A modern, dark-themed desktop application for browsing, tagging, and organising
-PDF files — built with **C++17** and **Qt 6** (Widgets).
+### Your team's papers, in one place — tagged, discussed, and always in sync.
+
+[![Qt 6](https://img.shields.io/badge/Qt-6.2%2B-41CD52?style=for-the-badge&logo=qt&logoColor=white)](https://www.qt.io/)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)](https://isocpp.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-backend-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%2B-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+
+[![Release](https://img.shields.io/github/v/release/DragMaid/PDFOrganizer?style=flat-square&color=blue&include_prereleases&sort=semver)](https://github.com/DragMaid/PDFOrganizer/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/DragMaid/PDFOrganizer/release.yml?style=flat-square&label=build)](https://github.com/DragMaid/PDFOrganizer/actions)
+[![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey?style=flat-square)](#get-it-running)
+![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)
+[![Stars](https://img.shields.io/github/stars/DragMaid/PDFOrganizer?style=flat-square&color=yellow)](https://github.com/DragMaid/PDFOrganizer/stargazers)
+
+</div>
 
 ---
 
-## Feature Overview
-
-| Feature | Details |
-|---|---|
-| **Folder management** | Add/remove root folders; recursive auto-scan; drag & drop folders onto the panel |
-| **Directory = group** | Every directory holding a PDF becomes a group of its own (`Papers`, `Papers/2023`); the PDFs sitting in it are tracked automatically |
-| **Live file watching** | `QFileSystemWatcher` detects new / deleted PDFs without manual refresh |
-| **External PDF viewer** | Opens with Okular (Linux) or the OS default (Windows / macOS fallback) |
-| **Tagging** | Group-scoped tags, created/renamed/deleted on the backend; concurrent adds never conflict |
-| **List view** | Sortable table: name · folder · tags · last opened · size |
-| **Grid / card view** | Thumbnail cards with tag pills; async thumbnail generation |
-| **Search** | Live filter by filename and/or tag text |
-| **Tag filter** | One-click chips in the left panel (AND semantics) |
-| **Groups** | One per directory; its creator invites and removes members by email, everyone else sees the roster |
-| **File notes** | Threaded notes per file, per group; only the author can edit or delete their own |
-| **Group sync** | Uploads a group's PDFs to Backblaze B2 *through the backend* — no storage credentials on the client |
-| **Accounts** | Email + password sign-in against the FastAPI backend; session survives restarts |
-| **Recent activity** | Bottom dock showing the 20 most recently opened PDFs |
-| **Dark mode** | Full stylesheet; persisted per-user; toggled in Settings |
-| **Persistent settings** | SQLite for metadata; `QSettings` for window geometry |
+<div align="center">
+  <img src="assets/screenshot.png" alt="PDF Organizer — grid view with tags, group members and notes" width="100%" />
+</div>
 
 ---
 
-## Architecture
+## 📚 No more "which version of the paper are we on?"
 
-The application is split across two processes.
+Shared research runs on a shared drive, a group chat, and everyone's memory.
+Someone downloads a PDF, renames it `final_v3_REAL.pdf`, drops a thought in
+Slack, and three weeks later nobody can find either. The paper is somewhere. The
+comment is somewhere else. The person who read it has moved on.
 
+**PDF Organizer puts the file, the tags and the conversation in the same
+window.** Point it at a folder, and that folder becomes something your team
+shares — same papers, same tags, same notes, on everyone's machine.
+
+---
+
+## ✨ What it does
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🗂️ A folder *is* a shared space
+Drop in a directory and it becomes a group. Everyone you invite gets the same
+papers on their own machine. No upload button hunting, no "did you get it?".
+
+### 🏷️ Tag it your way
+One-click chips in the sidebar filter instantly. Tags are shared with the group
+and **never conflict** — two people tagging the same paper at the same time just
+works.
+
+### 💬 Notes that stay with the paper
+Leave a thought on a PDF and your teammates see it next to the file, not buried
+in a chat log. Only you can edit your own notes.
+
+### 🔍 Find it in a keystroke
+Live search across names and tags. Sortable list view for scanning, card view
+with real page thumbnails for browsing.
+
+</td>
+<td width="50%" valign="top">
+
+### 🔗 Join with a code
+Share a short code (`PDFORG-S5G2-QFR2-45PR`), your teammate pastes it, and their
+copy fills in by itself.
+
+### ☁️ Sync that stays out of your way
+Uploads run in the background with a live progress bar. Keep tagging, keep
+reading — and hammering the sync button won't pile up duplicate work.
+
+### 🟢 Always know where you stand
+A coloured dot on every file: **green** it's shared, **amber** it's only on your
+machine, **blue** it's moving right now. Tags and notes you write offline queue
+up and ride along with the next sync.
+
+### 🌙 Dark by default
+Full dark theme, remembered window layout, and a "recently opened" dock so you
+can pick up exactly where you stopped.
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🎯 Built to get out of the way
+
+- **Nothing blocks.** Tagging, commenting and syncing are separate. You never
+  have to sync to write a tag, and a sync in progress never freezes the window.
+- **Nothing is silent.** Every action lands as a one-line status message instead
+  of a modal you have to dismiss. Errors say what went wrong in plain English.
+- **Nothing is a mystery.** Hover any file and the tooltip tells you whether the
+  group has it, and whether you have edits waiting to go up.
+- **Nothing is lost.** Delete a tag and the filter clears itself, the chips
+  rebuild, and every file's tag list updates — on your screen *and* on your
+  teammates', live over a websocket.
+
+---
+
+## 🚀 Get it running
+
+### Grab a build
+
+Prebuilt binaries for **Linux**, **macOS** and **Windows** are on the
+[Releases page](https://github.com/DragMaid/PDFOrganizer/releases).
+
+### Or build it yourself
+
+```bash
+git clone https://github.com/DragMaid/PDFOrganizer.git
+cd PDFOrganizer
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+./build/PDFOrganizer
 ```
-┌──────────────────────────────┐        ┌──────────────────────────────┐
-│  Qt desktop client           │  HTTPS │  FastAPI backend             │
-│                              │ ─────▶ │                              │
-│  • scans local folders       │  JWT   │  • Postgres (files, tags,    │
-│  • renders thumbnails        │        │    notes, groups, members)   │
-│  • local SQLite cache        │        │  • Backblaze B2 uploads      │
-│                              │        │  • enforces who may do what  │
-└──────────────────────────────┘        └──────────────────────────────┘
+
+<details>
+<summary><b>Per-platform prerequisites</b></summary>
+
+| Dependency | Minimum | Notes |
+|---|---|---|
+| CMake | 3.21 | |
+| C++ compiler | GCC 10 / Clang 12 / MSVC 2019 | C++17 |
+| Qt | 6.2 | Core, Widgets, Sql, Concurrent, Network, WebSockets |
+| Qt PDF | 6.4 *(optional)* | Real page thumbnails instead of placeholders |
+| Python | 3.11 | Backend only |
+| PostgreSQL | 14 | Backend only |
+
+**Linux (Ubuntu / Debian)**
+```bash
+sudo apt install cmake ninja-build qt6-base-dev qt6-base-dev-tools \
+                 libqt6sql6-sqlite qt6-websockets-dev qt6-pdf-dev
 ```
 
-**The client holds no shared credential.** It knows a server address and a
-refresh token; Postgres and Backblaze keys live only in the backend's
-environment. Everything shared — groups, tags, notes, uploads — goes through
-`src/api/ApiClient`, and nothing else in the client opens a socket.
-
-Local SQLite keeps what is genuinely per-machine (watched folders, scan
-results, thumbnails, preferences) plus two caches: file content hashes, and the
-backend ids those hashes map to.
-
-### A directory *is* a group
-
-Every directory that **directly** holds a PDF becomes its own group, named after
-its path below the watched root. It holds exactly the PDFs sitting in it — the
-ones a level down belong to that level's own group. There is no other way to put
-a file in one: **a file's group is decided by which directory it sits in**, not
-by a checkbox.
-
-```
-Add /home/me/Papers
-├── thesis.pdf             →  group "Papers"
-├── 2023/tax.pdf           →  group "Papers/2023"
-├── 2023/vat.pdf           →  group "Papers/2023"
-└── 2023/receipts/a.pdf    →  group "Papers/2023/receipts"
+**macOS (Homebrew)**
+```bash
+brew install cmake ninja qt@6
+export PATH="$(brew --prefix qt@6)/bin:$PATH"
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
+cmake --build build -j$(sysctl -n hw.logicalcpu)
 ```
 
-Three directories, three separate groups, each with its own members. A directory
-that holds no PDF of its own — only subdirectories that do — gets no group; it
-is a container, not a sharing unit. Scanning is still recursive, so subfolders
-are picked up and turned into groups without being added by hand.
+**Windows (MSVC + Qt Installer)**
+```powershell
+cmake -B build -G "Visual Studio 17 2022" -A x64 `
+      -DCMAKE_PREFIX_PATH="C:\Qt\6.x.x\msvc2022_64"
+cmake --build build --config Release
+```
+</details>
 
-Files are identified by the **SHA-256 of their contents**, not their path, so
-two people holding the same PDF in different directories share its tags and
-notes automatically, and a given PDF is uploaded to B2 exactly once.
+### The sharing half
 
-The **active group** shown in the toolbar is therefore derived rather than
-chosen: it is the group of the directory the selected file sits in, and it
-decides where shared work lands — a tag joins that group's vocabulary, a note is
-visible to exactly that group's members. With no file selected there is no
-active group, and the shared controls are inert.
-
-| Action | Who may do it |
-|---|---|
-| Read files, tags and notes | Any member of the group |
-| Add files, add/remove tags, write notes | Any member |
-| **Edit or delete a note** | **Only its author** — the group's creator is not exempt |
-| Rename the group, invite/remove members | **Only its creator** — whoever added the folder |
-| Leave the group | Any member, of themselves |
-
-The detail pane lists the group's members inline — name, email and whether they
-created it. Invite and remove controls are drawn only for the creator; everyone
-else sees the same roster read-only plus a **Leave** button. The backend applies
-the same rules whatever the client draws.
-
-Two housekeeping details follow from tying groups to directories:
-
-- **Names are disambiguated.** A subfolder carries its path below the root, so
-  `2023` under two different roots reads as `Papers/2023` and `Invoices/2023`.
-  Two watched roots sharing a basename (`Work/Papers`, `Home/Papers`) become
-  `Papers (Work)` and `Papers (Home)`, and their subfolder groups inherit that,
-  so the toolbar is never ambiguous.
-- **Removing a folder keeps its groups by default.** Un-watching a root is a
-  local act, and it now spans several groups — its own directory plus every
-  subdirectory that held a PDF. The confirmation says how many, and offers to
-  delete the ones you created and leave the ones you joined; that box starts
-  unticked so other members' notes are never destroyed by accident.
-
-Signing out clears the local id caches, including the directory → group mapping.
-On the next sign-in each directory re-attaches to the group of the same name you
-already own before creating a new one, so a round trip through the login sheet
-does not duplicate anything.
-
-### How conflicts are handled
-
-The two policies are deliberately opposite.
-
-**Tags never fight.** Adding a tag someone else just added succeeds and changes
-nothing; so does removing one they already removed. Names collide
-case-insensitively in the database, so the dedup is atomic rather than a
-read-then-write race. The one exception is renaming a tag onto an existing
-name — merging would silently lose assignments, so that reports a conflict.
-
-**Notes protect authorship.** Edits carry the version the UI displayed. If the
-note changed in between, the write is refused and the dialog shows the text
-that would have been overwritten instead of losing it.
-
-Every failure the backend returns carries a human-readable `message`, which the
-client shows verbatim in an error modal. Anything an `ApiClient` call does not
-handle explicitly reaches `MainWindow::onApiError` and becomes a modal, so no
-failure is silent.
-
-### Running it
-
-The client needs a backend. See **[`backend/README.md`](backend/README.md)** for
-setup; the short version:
+Everything shared lives behind a small FastAPI service. Full setup is in
+**[`backend/README.md`](backend/README.md)** — the short version:
 
 ```bash
 cd backend
@@ -147,274 +169,164 @@ python init_db.py
 uvicorn app.main:app --port 8000
 ```
 
-Then start the client and sign in; the address goes in the sign-in sheet and
-can be changed later under Settings ▸ Account.
+Then start the client, sign in, and paste the address into the sign-in sheet.
+You can change it later under **Settings ▸ Account**.
 
-To check the client and backend agree on the wire:
+> Working solo? Everything local — folders, tags, notes, thumbnails, search —
+> works without an account. Sign in only when you want to share.
+
+---
+
+## ⌨️ Shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl+O` | Add folder |
+| `Ctrl+1` / `Ctrl+2` | List view / Grid view |
+| `Enter` or double-click | Open the selected PDF |
+| `Ctrl+Q` | Quit |
+
+---
+
+## 🧩 Under the hood
+
+<div align="center">
+
+```
+┌──────────────────────────────┐        ┌──────────────────────────────┐
+│  Qt desktop client           │  HTTPS │  FastAPI backend             │
+│                              │ ─────▶ │                              │
+│  • scans local folders       │  JWT   │  • Postgres (files, tags,    │
+│  • renders thumbnails        │   +    │    notes, groups, members)   │
+│  • local SQLite cache        │   WS   │  • Backblaze B2 uploads      │
+│                              │        │  • enforces who may do what  │
+└──────────────────────────────┘        └──────────────────────────────┘
+```
+
+</div>
+
+**The client holds no shared credential.** It knows a server address and a
+refresh token; Postgres and Backblaze keys live only in the backend's
+environment. Everything shared goes through one class, `src/api/ApiClient`, and
+nothing else in the client opens a socket.
+
+Files are identified by the **SHA-256 of their contents**, not their path — so
+two people holding the same paper in different folders share its tags and notes
+automatically, and a given PDF is uploaded exactly once.
+
+<details>
+<summary><b>A directory <i>is</i> a group</b> — how sharing units are decided</summary>
+
+Every directory that **directly** holds a PDF becomes its own group, named after
+its path below the watched root. There is no other way to put a file in one:
+a file's group is decided by which directory it sits in, not by a checkbox.
+
+```
+Add /home/me/Papers
+├── thesis.pdf             →  group "Papers"
+├── 2023/tax.pdf           →  group "Papers/2023"
+├── 2023/vat.pdf           →  group "Papers/2023"
+└── 2023/receipts/a.pdf    →  group "Papers/2023/receipts"
+```
+
+Three directories, three separate groups, each with its own members. A directory
+holding only subdirectories gets no group — it's a container, not a sharing
+unit. Scanning is recursive, so subfolders become groups without being added by
+hand.
+
+The **active group** in the toolbar is derived, not chosen: it's the group of the
+directory the selected file sits in. With no file selected, the shared controls
+are inert.
+
+| Action | Who may do it |
+|---|---|
+| Read files, tags and notes | Any member |
+| Add files, add/remove tags, write notes | Any member |
+| **Edit or delete a note** | **Only its author** — the creator is not exempt |
+| Rename the group, invite/remove members | **Only its creator** |
+| Leave the group | Any member, of themselves |
+
+Two housekeeping details follow:
+
+- **Names are disambiguated.** `2023` under two roots reads as `Papers/2023` and
+  `Invoices/2023`; two roots sharing a basename become `Papers (Work)` and
+  `Papers (Home)`.
+- **Removing a folder keeps its groups by default.** Un-watching a root is a
+  local act spanning several groups. The confirmation says how many and offers
+  to delete the ones you created — unticked, so other people's notes are never
+  destroyed by accident.
+
+Signing out clears the local id caches. On the next sign-in each directory
+re-attaches to the group of the same name you already own, so a round trip
+through the login sheet duplicates nothing.
+</details>
+
+<details>
+<summary><b>How conflicts are handled</b></summary>
+
+The two policies are deliberately opposite.
+
+**Tags never fight.** Adding a tag someone else just added succeeds and changes
+nothing; so does removing one they already removed. Names collide
+case-insensitively in the database, so the dedup is atomic rather than a
+read-then-write race. The one exception is renaming a tag onto an existing
+name — merging would silently lose assignments, so that reports a conflict.
+
+**Notes protect authorship.** Edits carry the version the UI displayed. If the
+note changed in between, the write is refused and the dialog shows the text that
+would have been overwritten instead of losing it.
+
+Every backend failure carries a human-readable `message` the client shows
+verbatim, so no failure is silent.
+</details>
+
+<details>
+<summary><b>Code layout</b> — MVC with dedicated controllers</summary>
+
+```
+MainWindow          assembles everything; wires signals & slots
+   │
+   ├── views/       FolderPanel · ListView · GridView · RecentView · dialogs
+   │                  ↓ emit signals upward, never touch the database
+   ├── controllers/ PdfController · TagController · FolderWatcher
+   │                  ↓ coordinate models, database and services
+   ├── models/      PdfModel · TagModel · FolderModel · SearchFilterProxy
+   │                  ↓ own in-memory data, view-agnostic
+   ├── delegates/   ListDelegate · GridDelegate · SyncBadge
+   ├── api/         ApiClient (REST + websocket) · ApiTypes
+   ├── database/    DatabaseManager (SQLite)
+   └── utils/       PdfOpener · ThumbnailGenerator · SearchFilterProxy
+```
+
+**Qt Widgets over QML** — native dialogs and context menus, a mature and
+predictable API, simpler deployment, and a better fit for a data-heavy list/grid
+UI.
+
+**Async everywhere** — folder scanning and thumbnail rendering both run through
+`QtConcurrent::run` and deliver results on the main thread; every backend call
+is a non-blocking callback chain.
+
+Local SQLite keeps what is genuinely per-machine — watched folders, scan results,
+thumbnails, preferences — plus caches for file content hashes, the backend ids
+those hashes map to, and each directory's group.
+</details>
+
+<details>
+<summary><b>Checking the client and backend agree</b></summary>
 
 ```bash
 cmake -S . -B build -DBUILD_API_SMOKETEST=ON
 cmake --build build --target apiclient_smoketest
 ./build/apiclient_smoketest http://localhost:8000
 ```
-
-### Pattern: MVC with dedicated Controllers
-
-```
-┌─────────────────────────────────────────────────────┐
-│                     MainWindow                       │
-│  (assembles all components; wires signals & slots)   │
-└──────────┬───────────────────────────────────────────┘
-           │
-    ┌──────┴──────────────────────────────────────┐
-    │                  VIEWS                       │
-    │  FolderPanel  ListView  GridView  RecentView │
-    └──────┬──────────────────────────────────────┘
-           │ signals (fileActivated, editTagsRequested…)
-    ┌──────┴──────────────────────────────────────┐
-    │              CONTROLLERS                     │
-    │  PdfController  TagController  FolderWatcher │
-    └──────┬──────────────────────────────────────┘
-           │ reads/writes
-    ┌──────┴──────────────────────────────────────┐
-    │               MODELS                         │
-    │  PdfModel  TagModel  FolderModel             │
-    │  SearchFilterProxy (QSortFilterProxyModel)   │
-    └──────┬──────────────────────────────────────┘
-           │ persists
-    ┌──────┴──────────────────────────────────────┐
-    │             INFRASTRUCTURE                   │
-    │  DatabaseManager (SQLite)                    │
-    │  ThumbnailGenerator (QtConcurrent)           │
-    │  PdfOpener (Okular / QDesktopServices)       │
-    └─────────────────────────────────────────────┘
-```
-
-### Key design decisions
-
-**Qt Widgets over QML** — chosen for:
-- Native OS integration (file dialogs, context menus, accessibility)
-- Mature, stable API with predictable rendering
-- Simpler deployment (no QML runtime / type registration overhead)
-- Better fit for a data-heavy, list/grid-focused UI
-
-**MVC split**
-- Models (`PdfModel`, `TagModel`, `FolderModel`) own the *in-memory* data and
-  implement the standard Qt item model interface. They are view-agnostic.
-- Controllers coordinate between models, database, and external services.
-  No controller touches a widget.
-- Views only emit signals upward; they never call the database directly.
-
-**Async everywhere**
-- Folder scanning: `QtConcurrent::run` → result delivered via
-  `QFutureWatcher::finished` on the main thread.
-- Thumbnail rendering: same pattern — worker thread renders, main thread
-  calls `PdfModel::setThumbnail`.
+</details>
 
 ---
 
-## Project Structure
+<div align="center">
 
-```
-PDFOrganizer/
-├── CMakeLists.txt
-├── README.md
-├── resources/
-│   └── resources.qrc
-└── src/
-    ├── main.cpp
-    ├── mainwindow.h / .cpp
-    ├── models/
-    │   ├── pdffile.h / .cpp          # Domain value type
-    │   ├── pdfmodel.h / .cpp         # QAbstractTableModel
-    │   ├── tagmodel.h / .cpp         # QAbstractListModel
-    │   └── foldermodel.h / .cpp      # QAbstractListModel
-    ├── database/
-    │   └── databasemanager.h / .cpp  # SQLite via Qt SQL
-    ├── controllers/
-    │   ├── folderwatcher.h / .cpp    # Scan + QFileSystemWatcher
-    │   ├── pdfcontroller.h / .cpp    # Open PDF, track lastOpened
-    │   └── tagcontroller.h / .cpp    # Tag CRUD + assignment
-    ├── api/                          # ← every backend call lives here
-    │   ├── apiclient.h / .cpp        # Async REST client, token refresh
-    │   └── apitypes.h / .cpp         # DTOs + ApiError
-    ├── views/
-    │   ├── folderpanel.h / .cpp      # Left sidebar
-    │   ├── logindialog.h / .cpp      # Sign in / create account
-    │   ├── listview.h / .cpp         # Table view wrapper
-    │   ├── gridview.h / .cpp         # Icon/card view wrapper
-    │   ├── recentview.h / .cpp       # Dock: recently opened
-    │   ├── tagmanagerdialog.h / .cpp # A group's tag vocabulary
-    │   └── settingsdialog.h / .cpp   # Dark mode, default view, server
-    ├── delegates/
-    │   ├── listdelegate.h / .cpp     # Custom row painter
-    │   └── griddelegate.h / .cpp     # Custom card painter
-    └── utils/
-        ├── pdfopener.h / .cpp        # Okular + fallback
-        ├── thumbnailgenerator.h / .cpp # Async Qt::Pdf / placeholder
-        └── searchfilterproxy.h / .cpp  # Name + tag filter proxy
-```
+**MIT licensed.**
 
----
+Made for people who read too many papers.
 
-## Building
-
-### Prerequisites
-
-| Dependency | Minimum version | Notes |
-|---|---|---|
-| CMake | 3.21 | |
-| C++ compiler | GCC 10 / Clang 12 / MSVC 2019 | C++17 required |
-| Qt | 6.2 | Core, Widgets, Sql, Concurrent, Network |
-| Python | 3.11 | Backend only — see `backend/README.md` |
-| PostgreSQL | 14 | Backend only |
-| Qt PDF | 6.4 (optional) | Enables real PDF thumbnails |
-| SQLite | bundled with Qt | Via `QSQLITE` driver |
-
-### Linux (Ubuntu / Debian)
-
-```bash
-# Install Qt6 and build tools
-sudo apt install cmake ninja-build \
-    qt6-base-dev qt6-base-dev-tools \
-    libqt6sql6-sqlite
-
-# Optional: real PDF thumbnails
-sudo apt install qt6-pdf-dev
-
-# Clone and build
-git clone <repo-url> PDFOrganizer
-cd PDFOrganizer
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-./build/PDFOrganizer
-```
-
-### macOS (Homebrew)
-
-```bash
-brew install cmake ninja qt@6
-export PATH="$(brew --prefix qt@6)/bin:$PATH"
-
-cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_PREFIX_PATH="$(brew --prefix qt@6)"
-cmake --build build -j$(sysctl -n hw.logicalcpu)
-open build/PDFOrganizer.app
-```
-
-### Windows (MSVC + Qt Installer)
-
-```powershell
-# Assumes Qt 6 installed to C:\Qt\6.x.x\msvc2022_64
-cmake -B build -G "Visual Studio 17 2022" -A x64 `
-      -DCMAKE_PREFIX_PATH="C:\Qt\6.x.x\msvc2022_64"
-cmake --build build --config Release
-```
-
----
-
-## Database Schema
-
-```sql
--- Root folders the user has added
-CREATE TABLE folders (id INTEGER PRIMARY KEY, path TEXT UNIQUE);
-
--- Global tag vocabulary
-CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT UNIQUE COLLATE NOCASE);
-
--- One row per discovered PDF
-CREATE TABLE pdf_files (
-    id            INTEGER PRIMARY KEY,
-    path          TEXT UNIQUE,
-    folder_path   TEXT,
-    file_name     TEXT,
-    file_size     INTEGER,
-    last_modified TEXT,   -- ISO 8601
-    last_opened   TEXT,   -- ISO 8601
-    page_count    INTEGER
-);
-
--- Many-to-many: PDF ↔ Tag
-CREATE TABLE pdf_tags (
-    pdf_id INTEGER REFERENCES pdf_files(id) ON DELETE CASCADE,
-    tag_id INTEGER REFERENCES tags(id)      ON DELETE CASCADE,
-    PRIMARY KEY (pdf_id, tag_id)
-);
-
--- Key-value application settings
-CREATE TABLE settings (key TEXT UNIQUE, value TEXT);
-
--- SHA-256 of each file's contents: the identity the backend keys files by,
--- cached so a file is hashed once rather than on every sync
-CREATE TABLE file_hashes (
-    path          TEXT PRIMARY KEY,
-    content_hash  TEXT NOT NULL,
-    file_size     INTEGER NOT NULL,
-    last_modified TEXT
-);
-
--- Maps a content hash to the id the backend assigned it within a group
-CREATE TABLE remote_files (
-    group_id       INTEGER NOT NULL,
-    content_hash   TEXT    NOT NULL,
-    remote_file_id INTEGER NOT NULL,
-    PRIMARY KEY (group_id, content_hash)
-);
-
--- Which backend group holds a directory's PDFs. One row per directory that
--- holds a PDF directly — subdirectories get their own rows and their own
--- groups. Cleared on sign-out along with the ids above, then re-attached by
--- group name on the way back in.
-CREATE TABLE folder_groups (
-    folder_path TEXT    PRIMARY KEY,
-    group_id    INTEGER NOT NULL
-);
-```
-
----
-
-## Extending the Project
-
-### Adding a new column to the list view
-1. Add a constant to `PdfModel::Column` enum.
-2. Handle it in `PdfModel::data()` and `PdfModel::headerData()`.
-3. Configure column width in `ListView::buildUi()`.
-
-### Adding a new setting
-```cpp
-// Write
-m_db->setSetting("myFeature", true);
-
-// Read (with default)
-bool enabled = m_db->getSetting("myFeature", false).toBool();
-```
-
-### Supporting a different PDF viewer
-```cpp
-// In PdfOpener::open():
-if (QStandardPaths::findExecutable("evince").isEmpty() == false)
-    return QProcess::startDetached("evince", {filePath});
-```
-
-### Enabling real thumbnails
-Install `qt6-pdf-dev` (Linux) or the Qt PDF module, then CMake will detect
-`Qt6::Pdf` automatically and define `HAVE_QT_PDF`. `ThumbnailGenerator`
-will use `QPdfDocument` instead of the styled placeholder.
-
----
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|---|---|
-| `Ctrl+O` | Add folder |
-| `Ctrl+1` | Switch to List view |
-| `Ctrl+2` | Switch to Grid view |
-| `Enter` / double-click | Open selected PDF |
-| `Ctrl+Q` | Quit |
-
----
-
-## License
-
-MIT — see `LICENSE` for details.
+</div>
