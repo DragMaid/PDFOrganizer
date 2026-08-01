@@ -83,6 +83,62 @@ set(HEADERS
     src/utils/searchfilterproxy.h
 )
 
+# ── Application icon ─────────────────────────────────────────────────────────
+# Single source of truth for the app icon; platform-native formats are
+# generated from it at build time so there's nothing extra to keep in sync.
+set(APP_ICON_PNG ${CMAKE_SOURCE_DIR}/assets/icon.png)
+set(APP_ICON_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${APP_ICON_GEN_DIR})
+
+if(WIN32)
+    find_program(IMAGEMAGICK_CONVERT NAMES magick convert)
+    if(IMAGEMAGICK_CONVERT)
+        set(APP_ICON_ICO ${APP_ICON_GEN_DIR}/app.ico)
+        set(APP_ICON_RC ${APP_ICON_GEN_DIR}/app_icon.rc)
+        add_custom_command(
+            OUTPUT ${APP_ICON_ICO}
+            COMMAND ${IMAGEMAGICK_CONVERT} ${APP_ICON_PNG}
+                    -define icon:auto-resize=256,128,64,48,32,16
+                    ${APP_ICON_ICO}
+            DEPENDS ${APP_ICON_PNG}
+            COMMENT "Generating Windows app icon (.ico) from assets/icon.png"
+        )
+        file(WRITE ${APP_ICON_RC} "IDI_ICON1 ICON \"${APP_ICON_ICO}\"\n")
+        set_source_files_properties(${APP_ICON_RC} PROPERTIES OBJECT_DEPENDS ${APP_ICON_ICO})
+        list(APPEND SOURCES ${APP_ICON_RC})
+    else()
+        message(WARNING "ImageMagick not found — the Windows .exe will not have an embedded icon")
+    endif()
+elseif(APPLE)
+    find_program(SIPS_EXE sips)
+    find_program(ICONUTIL_EXE iconutil)
+    if(SIPS_EXE AND ICONUTIL_EXE)
+        set(APP_ICONSET_DIR ${APP_ICON_GEN_DIR}/app.iconset)
+        set(APP_ICON_ICNS ${APP_ICON_GEN_DIR}/app.icns)
+        add_custom_command(
+            OUTPUT ${APP_ICON_ICNS}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${APP_ICONSET_DIR}
+            COMMAND ${SIPS_EXE} -z 16   16   ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_16x16.png
+            COMMAND ${SIPS_EXE} -z 32   32   ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_16x16@2x.png
+            COMMAND ${SIPS_EXE} -z 32   32   ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_32x32.png
+            COMMAND ${SIPS_EXE} -z 64   64   ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_32x32@2x.png
+            COMMAND ${SIPS_EXE} -z 128  128  ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_128x128.png
+            COMMAND ${SIPS_EXE} -z 256  256  ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_128x128@2x.png
+            COMMAND ${SIPS_EXE} -z 256  256  ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_256x256.png
+            COMMAND ${SIPS_EXE} -z 512  512  ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_256x256@2x.png
+            COMMAND ${SIPS_EXE} -z 512  512  ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_512x512.png
+            COMMAND ${SIPS_EXE} -z 1024 1024 ${APP_ICON_PNG} --out ${APP_ICONSET_DIR}/icon_512x512@2x.png
+            COMMAND ${ICONUTIL_EXE} -c icns ${APP_ICONSET_DIR} -o ${APP_ICON_ICNS}
+            DEPENDS ${APP_ICON_PNG}
+            COMMENT "Generating macOS app icon (.icns) from assets/icon.png"
+        )
+        set_source_files_properties(${APP_ICON_ICNS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+        list(APPEND SOURCES ${APP_ICON_ICNS})
+    else()
+        message(WARNING "sips/iconutil not found — the macOS .app bundle will not have an icon")
+    endif()
+endif()
+
 # ── Executable ────────────────────────────────────────────────────────────────
 add_executable(PDFOrganizer ${SOURCES} ${HEADERS})
 
@@ -109,7 +165,10 @@ endif()
 if(WIN32)
     set_target_properties(PDFOrganizer PROPERTIES WIN32_EXECUTABLE TRUE)
 elseif(APPLE)
-    set_target_properties(PDFOrganizer PROPERTIES MACOSX_BUNDLE TRUE)
+    set_target_properties(PDFOrganizer PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_ICON_FILE app.icns
+    )
 endif()
 
 # ── API smoke test ────────────────────────────────────────────────────────────

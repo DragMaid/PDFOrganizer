@@ -6,8 +6,6 @@
 #include <QFileInfo>
 #include <QUuid>
 
-static constexpr int kSchemaVersion = 1;
-
 DatabaseManager::DatabaseManager(QObject* parent)
     : QObject(parent)
     , m_connectionName(QUuid::createUuid().toString(QUuid::WithoutBraces))
