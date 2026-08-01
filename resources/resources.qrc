@@ -1,13 +1,5 @@
 <RCC>
     <qresource prefix="/">
-        <!-- 
-            Add icon files here as the project grows, e.g.:
-            <file>icons/app.png</file>
-            <file>icons/list-view.svg</file>
-            <file>icons/grid-view.svg</file>
-            
-            For now the app uses Unicode symbols embedded in QAction text
-            so no external icon resources are required at compile time.
-        -->
+        <file alias="icons/app.png">../assets/icon.png</file>
     </qresource>
 </RCC>

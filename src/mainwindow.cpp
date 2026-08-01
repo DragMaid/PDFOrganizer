@@ -47,6 +47,7 @@
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -111,6 +112,7 @@ QString breakableText(const QString &text) {
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
   setWindowTitle(QStringLiteral("PDF Organizer"));
+  setWindowIcon(QIcon(QStringLiteral(":/icons/app.png")));
   setMinimumSize(900, 600);
 
   initModels();
