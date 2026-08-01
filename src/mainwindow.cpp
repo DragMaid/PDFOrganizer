@@ -752,9 +752,9 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
   // Asking twice for the same file would send a second removal for something
   // already on its way out, and the second one would fail with "no such file".
   if (m_removingFiles.contains(filePath)) {
-    showActivity(QStringLiteral("'%1' is already being removed…")
-                     .arg(file.fileName),
-                 4000);
+    showActivity(
+        QStringLiteral("'%1' is already being removed…").arg(file.fileName),
+        4000);
     return;
   }
 
@@ -762,8 +762,9 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
   const int groupId = groupIdForFolder(folderPath);
   const ApiGroup group = groupById(groupId);
   const QString hash = contentHashFor(filePath);
-  const int remoteFileId =
-      (groupId >= 0 && !hash.isEmpty()) ? m_db->remoteFileId(groupId, hash) : -1;
+  const int remoteFileId = (groupId >= 0 && !hash.isEmpty())
+                               ? m_db->remoteFileId(groupId, hash)
+                               : -1;
 
   if (!group.isValid() || remoteFileId < 0) {
     QMessageBox::information(
@@ -795,9 +796,10 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
   // disappears from the folder is a download waiting to happen, and only this
   // removal is a decision about shared state.
   auto *note = new QLabel(
-      QStringLiteral("Deleting a PDF in your file manager never does this — the "
-                     "next sync downloads it again. Only removing it here "
-                     "takes it out of the group."),
+      QStringLiteral(
+          "Deleting a PDF in your file manager never does this — the "
+          "next sync downloads it again. Only removing it here "
+          "takes it out of the group."),
       &dlg);
   note->setWordWrap(true);
   note->setStyleSheet(QStringLiteral("color: #8a8d95; font-size: 8pt;"));
@@ -827,17 +829,18 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
   layout->addWidget(warning);
   connect(purge, &QCheckBox::toggled, warning, &QLabel::setVisible);
 
-  auto *deleteLocal = new QCheckBox(
-      QStringLiteral("Also delete my local copy from %1")
-          .arg(QDir::toNativeSeparators(folderPath)),
-      &dlg);
+  auto *deleteLocal =
+      new QCheckBox(QStringLiteral("Also delete my local copy from %1")
+                        .arg(QDir::toNativeSeparators(folderPath)),
+                    &dlg);
   layout->addWidget(deleteLocal);
 
   // Keeping the local copy is a real choice, but not a quiet one: this folder
   // *is* the group, so the next scan hands the file straight back to it.
   auto *keepNote = new QLabel(
-      QStringLiteral("If you keep your local copy, the next scan of this folder "
-                     "adds the file back to the group."),
+      QStringLiteral(
+          "If you keep your local copy, the next scan of this folder "
+          "adds the file back to the group."),
       &dlg);
   keepNote->setWordWrap(true);
   keepNote->setStyleSheet(QStringLiteral("color: #8a8d95; font-size: 8pt;"));
@@ -847,8 +850,8 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
 
   auto *buttons =
       new QDialogButtonBox(QDialogButtonBox::Cancel, Qt::Horizontal, &dlg);
-  auto *confirm =
-      buttons->addButton(QStringLiteral("Remove"), QDialogButtonBox::AcceptRole);
+  auto *confirm = buttons->addButton(QStringLiteral("Remove"),
+                                     QDialogButtonBox::AcceptRole);
   connect(confirm, &QPushButton::clicked, &dlg, &QDialog::accept);
   connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
   layout->addWidget(buttons);
@@ -870,7 +873,8 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
 
   // Whichever way it ends, the mark has to come off — otherwise the row stays
   // greyed out forever and the file can never be removed again.
-  const auto finished = [this, filePath](const QString &status, int clearAfter) {
+  const auto finished = [this, filePath](const QString &status,
+                                         int clearAfter) {
     m_removingFiles.remove(filePath);
     m_pdfModel->setPendingRemoval(filePath, false);
     showActivity(status, clearAfter);
@@ -878,8 +882,8 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
 
   m_api->removeFile(
       groupId, remoteFileId, alsoPurge,
-      [this, groupId, hash, filePath, fileName, alsoDeleteLocal, finished](
-          const ApiFileRemoval &result) {
+      [this, groupId, hash, filePath, fileName, alsoDeleteLocal,
+       finished](const ApiFileRemoval &result) {
         // The cached id points at a link that no longer exists; leaving it
         // would make the next sync think the file is still registered.
         m_db->forgetRemoteFile(groupId, hash);
@@ -904,16 +908,17 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
                     "could not be deleted — check the file's permissions.\n\n"
                     "It will be added back to the group on the next scan.")
                     .arg(fileName));
-            status = QStringLiteral("⚠ %1 removed, local copy kept")
-                         .arg(fileName);
+            status =
+                QStringLiteral("⚠ %1 removed, local copy kept").arg(fileName);
           }
         }
 
         finished(status, 6000);
         if (result.purged) {
-          showActivity(QStringLiteral("✓ Removed %1 and deleted its stored copy")
-                           .arg(fileName),
-                       6000);
+          showActivity(
+              QStringLiteral("✓ Removed %1 and deleted its stored copy")
+                  .arg(fileName),
+              6000);
         }
 
         reloadGroups([this]() { refreshDetailPane(); });
@@ -972,9 +977,10 @@ void MainWindow::promptSignIn() {
   m_signingIn = true;
 
   LoginDialog dlg(m_api, this);
-  dlg.setServerUrl(m_db->getSetting(QStringLiteral("serverUrl"),
-                                    QStringLiteral("http://localhost:8000"))
-                       .toString());
+  dlg.setServerUrl(
+      m_db->getSetting(QStringLiteral("serverUrl"),
+                       QStringLiteral("https://pdforganizer-2k92.onrender.com"))
+          .toString());
   dlg.setEmail(m_db->getSetting(QStringLiteral("userEmail")).toString());
 
   const bool accepted = dlg.exec() == QDialog::Accepted;
@@ -1083,8 +1089,8 @@ void MainWindow::onRemoteEvent(const ApiRemoteEvent &event) {
     // Only worth re-fetching if the note is about the file being looked at.
     // refreshNotes() works that out from the selection, so the check here is
     // just to avoid a request for a note attached to some other file.
-    const int shownFileId = m_db->remoteFileId(
-        event.groupId, contentHashFor(m_selectedFilePath));
+    const int shownFileId =
+        m_db->remoteFileId(event.groupId, contentHashFor(m_selectedFilePath));
     if (event.fileId < 0 || event.fileId == shownFileId)
       refreshNotes();
   }
@@ -1561,7 +1567,8 @@ int MainWindow::mostOutOfSyncGroup() const {
   // looks complete. Being ahead is at least visible on disk.
   int best = -1;
   int bestScore = 0;
-  for (auto it = m_syncCounts.constBegin(); it != m_syncCounts.constEnd(); ++it) {
+  for (auto it = m_syncCounts.constBegin(); it != m_syncCounts.constEnd();
+       ++it) {
     const SyncCounts &counts = it.value();
     const int score =
         counts.downloads * 1000 + counts.uploads * 10 + counts.pendingMeta;
@@ -1614,7 +1621,8 @@ void MainWindow::updateSyncIndicators() {
   // How many *other* groups are also behind, so one busy folder does not hide
   // the fact that three of them need attention.
   int alsoWaiting = 0;
-  for (auto it = m_syncCounts.constBegin(); it != m_syncCounts.constEnd(); ++it) {
+  for (auto it = m_syncCounts.constBegin(); it != m_syncCounts.constEnd();
+       ++it) {
     if (it.key() != groupId && !it.value().inSync())
       ++alsoWaiting;
   }
@@ -1865,7 +1873,7 @@ void MainWindow::onAddNote() {
                 showError(error);
             });
       },
-      [this, queue](const ApiError &) { queue(); });
+      [queue](const ApiError &) { queue(); });
 }
 
 void MainWindow::refreshNotes() {
@@ -1967,9 +1975,10 @@ QWidget *MainWindow::buildQueuedNoteBubble(const QString &body) {
   text->setTextInteractionFlags(Qt::TextSelectableByMouse);
   bl->addWidget(text);
 
-  bubble->setStyleSheet(QStringLiteral(
-      "QWidget#queuedNoteBubble { background: rgba(208,162,76,0.08); border: 1px "
-      "dashed rgba(208,162,76,0.35); border-radius: 8px; }"));
+  bubble->setStyleSheet(
+      QStringLiteral("QWidget#queuedNoteBubble { background: "
+                     "rgba(208,162,76,0.08); border: 1px "
+                     "dashed rgba(208,162,76,0.35); border-radius: 8px; }"));
   return bubble;
 }
 
@@ -2376,80 +2385,78 @@ void MainWindow::adoptJoinedFolder(const QString &folderPath,
   // group's, so nothing else here could steer it to the group we just joined.
   m_db->storeFolderGroup(folderPath, group.id, group.name);
 
-  m_api->listFiles(
-      group.id, [this, folderPath, group](const QList<ApiFile> &files) {
-        // Content, not names, decides what is already here: a file kept from a
-        // previous sync may sit under a different name than the group gives it,
-        // and re-downloading it would only produce a numbered duplicate.
-        const QStringList present =
-            QDir(folderPath)
-                .entryList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
-        QSet<QString> localHashes;
-        for (const QString &name : present) {
-          const QString hash =
-              contentHashFor(QDir(folderPath).absoluteFilePath(name));
-          if (!hash.isEmpty())
-            localHashes.insert(hash);
-        }
+  m_api->listFiles(group.id, [this, folderPath,
+                              group](const QList<ApiFile> &files) {
+    // Content, not names, decides what is already here: a file kept from a
+    // previous sync may sit under a different name than the group gives it,
+    // and re-downloading it would only produce a numbered duplicate.
+    const QStringList present =
+        QDir(folderPath)
+            .entryList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
+    QSet<QString> localHashes;
+    for (const QString &name : present) {
+      const QString hash =
+          contentHashFor(QDir(folderPath).absoluteFilePath(name));
+      if (!hash.isEmpty())
+        localHashes.insert(hash);
+    }
 
-        QList<ApiFile> pending;
-        for (const ApiFile &file : files) {
-          if (!localHashes.contains(file.contentHash))
-            pending << file;
-        }
+    QList<ApiFile> pending;
+    for (const ApiFile &file : files) {
+      if (!localHashes.contains(file.contentHash))
+        pending << file;
+    }
 
-        if (pending.isEmpty()) {
-          QMessageBox::information(
-              this, QStringLiteral("Nothing To Download"),
-              QStringLiteral("'%1' is synced to:\n\n%2\n\nYou already have all "
-                             "%3 of its file(s).")
-                  .arg(group.name, QDir::toNativeSeparators(folderPath))
-                  .arg(files.size()));
+    if (pending.isEmpty()) {
+      QMessageBox::information(
+          this, QStringLiteral("Nothing To Download"),
+          QStringLiteral("'%1' is synced to:\n\n%2\n\nYou already have all "
+                         "%3 of its file(s).")
+              .arg(group.name, QDir::toNativeSeparators(folderPath))
+              .arg(files.size()));
+      watchJoinedFolder(folderPath);
+      return;
+    }
+
+    auto *progress = new QProgressDialog(
+        QStringLiteral("Downloading files from '%1'…").arg(group.name),
+        QStringLiteral("Cancel"), 0, pending.size(), this);
+    progress->setWindowModality(Qt::WindowModal);
+    progress->setMinimumDuration(0);
+    progress->setValue(0);
+
+    // Existing names are off limits so a download never overwrites a file
+    // that was already there.
+    downloadNext(
+        group.id, folderPath, pending, present, 0, 0, progress,
+        [this, folderPath](int downloaded, int skipped, bool canceled) {
+          QString message = QStringLiteral("Downloaded %1 file(s) into:\n\n%2")
+                                .arg(downloaded)
+                                .arg(QDir::toNativeSeparators(folderPath));
+          if (skipped > 0) {
+            message +=
+                QStringLiteral(
+                    "\n\n%1 file(s) were skipped: they are registered in "
+                    "the group but nobody has uploaded their contents yet. "
+                    "They arrive once a member who holds them runs Sync.")
+                    .arg(skipped);
+          }
+          if (canceled) {
+            message += QStringLiteral(
+                "\n\nThe rest were not downloaded. Sync the folder to "
+                "finish.");
+          }
+
+          QMessageBox::information(this,
+                                   canceled ? QStringLiteral("Download Stopped")
+                                            : QStringLiteral("Folder Synced"),
+                                   message);
+
+          // Whatever arrived is real and worth keeping, so the folder is
+          // adopted even after a cancel or a failure.
           watchJoinedFolder(folderPath);
-          return;
-        }
-
-        auto *progress = new QProgressDialog(
-            QStringLiteral("Downloading files from '%1'…").arg(group.name),
-            QStringLiteral("Cancel"), 0, pending.size(), this);
-        progress->setWindowModality(Qt::WindowModal);
-        progress->setMinimumDuration(0);
-        progress->setValue(0);
-
-        // Existing names are off limits so a download never overwrites a file
-        // that was already there.
-        downloadNext(
-            group.id, folderPath, pending, present, 0, 0, progress,
-            [this, folderPath](int downloaded, int skipped, bool canceled) {
-              QString message =
-                  QStringLiteral("Downloaded %1 file(s) into:\n\n%2")
-                      .arg(downloaded)
-                      .arg(QDir::toNativeSeparators(folderPath));
-              if (skipped > 0) {
-                message +=
-                    QStringLiteral(
-                        "\n\n%1 file(s) were skipped: they are registered in "
-                        "the group but nobody has uploaded their contents yet. "
-                        "They arrive once a member who holds them runs Sync.")
-                        .arg(skipped);
-              }
-              if (canceled) {
-                message += QStringLiteral(
-                    "\n\nThe rest were not downloaded. Sync the folder to "
-                    "finish.");
-              }
-
-              QMessageBox::information(
-                  this,
-                  canceled ? QStringLiteral("Download Stopped")
-                           : QStringLiteral("Folder Synced"),
-                  message);
-
-              // Whatever arrived is real and worth keeping, so the folder is
-              // adopted even after a cancel or a failure.
-              watchJoinedFolder(folderPath);
-            });
-      });
+        });
+  });
 }
 
 void MainWindow::watchJoinedFolder(const QString &folderPath) {
@@ -2602,9 +2609,9 @@ void MainWindow::runSync(int groupId, const ApiGroup &group,
 
   // Uploads before downloads: a member who is both ahead and behind should
   // hand over what only they have before spending time pulling.
-  const auto startDownloads = [this, groupId, group, folderPath, toDownload](
-                                  int uploaded, int uploadSkipped,
-                                  bool canceled) {
+  const auto startDownloads = [this, groupId, group, folderPath,
+                               toDownload](int uploaded, int uploadSkipped,
+                                           bool canceled) {
     const auto report = [this, group, uploaded, uploadSkipped](
                             int downloaded, int downloadSkipped, bool stopped) {
       QStringList lines;
@@ -2695,20 +2702,25 @@ void MainWindow::syncPendingData(int groupId, std::function<void()> onDone) {
   });
 }
 
-void MainWindow::syncNextPendingFile(int groupId, QStringList pending, std::function<void()> onDone) {
+void MainWindow::syncNextPendingFile(int groupId, QStringList pending,
+                                     std::function<void()> onDone) {
   if (pending.isEmpty()) {
     onDone();
     return;
   }
   const QString filePath = pending.takeFirst();
-  resolveRemoteFile(groupId, filePath, [this, groupId, pending, onDone](int) {
-    syncNextPendingFile(groupId, pending, onDone);
-  }, [onDone](const ApiError&) {
-    onDone(); // continue even if failed
-  });
+  resolveRemoteFile(
+      groupId, filePath,
+      [this, groupId, pending, onDone](int) {
+        syncNextPendingFile(groupId, pending, onDone);
+      },
+      [onDone](const ApiError &) {
+        onDone(); // continue even if failed
+      });
 }
 
-void MainWindow::syncNextPendingTag(int groupId, QList<int> pendingFiles, std::function<void()> onDone) {
+void MainWindow::syncNextPendingTag(int groupId, QList<int> pendingFiles,
+                                    std::function<void()> onDone) {
   if (pendingFiles.isEmpty()) {
     onDone();
     return;
@@ -2716,7 +2728,7 @@ void MainWindow::syncNextPendingTag(int groupId, QList<int> pendingFiles, std::f
   const int fileId = pendingFiles.takeFirst();
   const QList<PdfFile> files = m_pdfModel->allFiles();
   PdfFile target;
-  for (const PdfFile& f : files) {
+  for (const PdfFile &f : files) {
     if (f.id == fileId) {
       target = f;
       break;
@@ -2726,19 +2738,25 @@ void MainWindow::syncNextPendingTag(int groupId, QList<int> pendingFiles, std::f
     syncNextPendingTag(groupId, pendingFiles, onDone);
     return;
   }
-  
-  resolveRemoteFile(groupId, target.filePath, [this, groupId, target, fileId, pendingFiles, onDone](int remoteFileId) {
-    const QStringList tags = m_db->getFileTags(fileId);
-    m_api->setFileTags(groupId, remoteFileId, tags, [this, fileId, groupId, pendingFiles, onDone](const QList<ApiTag>&) {
-      m_db->setPendingTags(fileId, false);
-      syncNextPendingTag(groupId, pendingFiles, onDone);
-    });
-  }, [this, groupId, pendingFiles, onDone](const ApiError&) {
-    syncNextPendingTag(groupId, pendingFiles, onDone);
-  });
+
+  resolveRemoteFile(
+      groupId, target.filePath,
+      [this, groupId, target, fileId, pendingFiles, onDone](int remoteFileId) {
+        const QStringList tags = m_db->getFileTags(fileId);
+        m_api->setFileTags(groupId, remoteFileId, tags,
+                           [this, fileId, groupId, pendingFiles,
+                            onDone](const QList<ApiTag> &) {
+                             m_db->setPendingTags(fileId, false);
+                             syncNextPendingTag(groupId, pendingFiles, onDone);
+                           });
+      },
+      [this, groupId, pendingFiles, onDone](const ApiError &) {
+        syncNextPendingTag(groupId, pendingFiles, onDone);
+      });
 }
 
-void MainWindow::syncNextPendingNote(int groupId, QList<int> pendingFiles, std::function<void()> onDone) {
+void MainWindow::syncNextPendingNote(int groupId, QList<int> pendingFiles,
+                                     std::function<void()> onDone) {
   if (pendingFiles.isEmpty()) {
     onDone();
     return;
@@ -2746,7 +2764,7 @@ void MainWindow::syncNextPendingNote(int groupId, QList<int> pendingFiles, std::
   const int fileId = pendingFiles.takeFirst();
   const QList<PdfFile> files = m_pdfModel->allFiles();
   PdfFile target;
-  for (const PdfFile& f : files) {
+  for (const PdfFile &f : files) {
     if (f.id == fileId) {
       target = f;
       break;
@@ -2763,31 +2781,40 @@ void MainWindow::syncNextPendingNote(int groupId, QList<int> pendingFiles, std::
     return;
   }
 
-  resolveRemoteFile(groupId, target.filePath, [this, groupId, target, fileId, notes, pendingFiles, onDone](int remoteFileId) {
-    syncNotesForFile(groupId, remoteFileId, fileId, notes, [this, groupId, pendingFiles, onDone]() {
-      syncNextPendingNote(groupId, pendingFiles, onDone);
-    });
-  }, [this, groupId, pendingFiles, onDone](const ApiError&) {
-    syncNextPendingNote(groupId, pendingFiles, onDone);
-  });
+  resolveRemoteFile(
+      groupId, target.filePath,
+      [this, groupId, target, fileId, notes, pendingFiles,
+       onDone](int remoteFileId) {
+        syncNotesForFile(groupId, remoteFileId, fileId, notes,
+                         [this, groupId, pendingFiles, onDone]() {
+                           syncNextPendingNote(groupId, pendingFiles, onDone);
+                         });
+      },
+      [this, groupId, pendingFiles, onDone](const ApiError &) {
+        syncNextPendingNote(groupId, pendingFiles, onDone);
+      });
 }
 
-void MainWindow::syncNotesForFile(int groupId, int remoteFileId, int localFileId, QStringList notes, std::function<void()> onDone) {
+void MainWindow::syncNotesForFile(int groupId, int remoteFileId,
+                                  int localFileId, QStringList notes,
+                                  std::function<void()> onDone) {
   if (notes.isEmpty()) {
     m_db->clearPendingNotes(localFileId);
     onDone();
     return;
   }
   const QString body = notes.takeFirst();
-  m_api->createNote(groupId, remoteFileId, body, [this, groupId, remoteFileId, localFileId, notes, onDone](const ApiNote&) {
-    syncNotesForFile(groupId, remoteFileId, localFileId, notes, onDone);
-  });
+  m_api->createNote(groupId, remoteFileId, body,
+                    [this, groupId, remoteFileId, localFileId, notes,
+                     onDone](const ApiNote &) {
+                      syncNotesForFile(groupId, remoteFileId, localFileId,
+                                       notes, onDone);
+                    });
 }
 
-void MainWindow::uploadNext(
-    int groupId, QList<ApiFile> pending, int uploaded, int skipped,
-    QProgressDialog *progress,
-    std::function<void(int, int, bool)> onDone) {
+void MainWindow::uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
+                            int skipped, QProgressDialog *progress,
+                            std::function<void(int, int, bool)> onDone) {
   const int done = uploaded + skipped;
 
   if (pending.isEmpty() || progress->wasCanceled()) {
@@ -3076,7 +3103,8 @@ void MainWindow::refreshDetailPane() {
                     "You created this group — remove its folder to delete it")
               : QString{});
   m_syncBtn->setEnabled(hasGroup);
-  // Only actually asks the server when the group changed; see refreshSyncCounts.
+  // Only actually asks the server when the group changed; see
+  // refreshSyncCounts.
   refreshSyncCounts();
 
   // Any member may pass the code on — it is how the group grows, and the owner

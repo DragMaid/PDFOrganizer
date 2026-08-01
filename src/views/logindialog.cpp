@@ -30,7 +30,7 @@ void LoginDialog::buildUi()
     form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 
     m_serverEdit = new QLineEdit(this);
-    m_serverEdit->setPlaceholderText(QStringLiteral("http://localhost:8000"));
+    m_serverEdit->setPlaceholderText(QStringLiteral("https://coolwebsite.com"));
     form->addRow(QStringLiteral("Server:"), m_serverEdit);
 
     m_emailEdit = new QLineEdit(this);
@@ -160,9 +160,7 @@ void LoginDialog::onSubmit()
     }
     const QUrl url(server);
     if (!url.isValid() || url.host().isEmpty()) {
-        showMessage(QStringLiteral(
-            "That server address isn't valid. It should look like "
-            "http://localhost:8000"));
+        showMessage(QStringLiteral("That server address isn't valid"));
         return;
     }
     if (email.isEmpty() || password.isEmpty()) {

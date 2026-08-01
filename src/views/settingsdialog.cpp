@@ -41,7 +41,7 @@ void SettingsDialog::buildUi()
     auto* accountForm = new QFormLayout(accountGrp);
 
     m_serverEdit = new QLineEdit(this);
-    m_serverEdit->setPlaceholderText(QStringLiteral("http://localhost:8000"));
+    m_serverEdit->setPlaceholderText(QStringLiteral("https://coolwebsite.com"));
     accountForm->addRow(QStringLiteral("Server:"), m_serverEdit);
 
     m_accountLabel = new QLabel(this);
