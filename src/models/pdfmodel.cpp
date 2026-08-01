@@ -39,6 +39,9 @@ QVariant PdfModel::data(const QModelIndex& index, int role) const
     case DatabaseIdRole:  return f.id;
     case PdfFileRole:     return QVariant::fromValue(f);
     case PendingRemovalRole: return m_pendingRemoval.contains(f.filePath);
+    case SyncStateRole:   return static_cast<int>(m_syncMarks.value(f.filePath).state);
+    case SyncDetailRole:  return m_syncMarks.value(f.filePath).detail;
+    case PendingMetaRole: return m_pendingMeta.contains(f.filePath);
     default: break;
     }
 
@@ -56,8 +59,19 @@ QVariant PdfModel::data(const QModelIndex& index, int role) const
         }
     }
 
-    if (role == Qt::ToolTipRole)
-        return f.filePath;
+    if (role == Qt::ToolTipRole) {
+        // The path answers "which file"; the sync line answers the question the
+        // coloured dot on the row raises but cannot spell out.
+        QStringList lines{f.filePath};
+        const QString detail = m_syncMarks.value(f.filePath).detail;
+        if (!detail.isEmpty())
+            lines << detail;
+        if (m_pendingMeta.contains(f.filePath)) {
+            lines << QStringLiteral("Tags or notes written here are waiting to "
+                                    "go up with this file.");
+        }
+        return lines.join(QLatin1Char('\n'));
+    }
 
     if (role == Qt::DecorationRole && index.column() == ColFileName)
         return !f.thumbnail.isNull() ? f.thumbnail.scaled(24, 24, Qt::KeepAspectRatio, Qt::SmoothTransformation)
@@ -96,6 +110,9 @@ QHash<int, QByteArray> PdfModel::roleNames() const
     roles[DatabaseIdRole]  = "databaseId";
     roles[PdfFileRole]     = "pdfFile";
     roles[PendingRemovalRole] = "pendingRemoval";
+    roles[SyncStateRole]   = "syncState";
+    roles[SyncDetailRole]  = "syncDetail";
+    roles[PendingMetaRole] = "pendingMeta";
     return roles;
 }
 
@@ -176,6 +193,61 @@ void PdfModel::setPendingRemoval(const QString& filePath, bool pending)
 bool PdfModel::isPendingRemoval(const QString& filePath) const
 {
     return m_pendingRemoval.contains(filePath);
+}
+
+void PdfModel::setSyncState(const QString& filePath, SyncState state,
+                            const QString& detail)
+{
+    const SyncMark previous = m_syncMarks.value(filePath);
+    if (previous.state == state && previous.detail == detail)
+        return;
+
+    if (state == SyncUnknown && detail.isEmpty())
+        m_syncMarks.remove(filePath);
+    else
+        m_syncMarks.insert(filePath, SyncMark{state, detail});
+
+    const int row = rowForPath(filePath);
+    if (row < 0)
+        return;
+    emit dataChanged(index(row, 0), index(row, ColCount - 1),
+                     {SyncStateRole, SyncDetailRole, Qt::ToolTipRole});
+}
+
+PdfModel::SyncState PdfModel::syncState(const QString& filePath) const
+{
+    return m_syncMarks.value(filePath).state;
+}
+
+void PdfModel::setPendingMeta(const QString& filePath, bool pending)
+{
+    if (m_pendingMeta.contains(filePath) == pending)
+        return;
+
+    if (pending)
+        m_pendingMeta.insert(filePath);
+    else
+        m_pendingMeta.remove(filePath);
+
+    const int row = rowForPath(filePath);
+    if (row < 0)
+        return;
+    emit dataChanged(index(row, 0), index(row, ColCount - 1),
+                     {PendingMetaRole, Qt::ToolTipRole});
+}
+
+void PdfModel::clearSyncStates()
+{
+    if (m_syncMarks.isEmpty() && m_pendingMeta.isEmpty())
+        return;
+
+    m_syncMarks.clear();
+    m_pendingMeta.clear();
+    if (m_files.isEmpty())
+        return;
+    emit dataChanged(index(0, 0), index(m_files.size() - 1, ColCount - 1),
+                     {SyncStateRole, SyncDetailRole, PendingMetaRole,
+                      Qt::ToolTipRole});
 }
 
 // ── Query ─────────────────────────────────────────────────────────────────────

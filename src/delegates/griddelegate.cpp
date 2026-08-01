@@ -1,5 +1,6 @@
 #include "griddelegate.h"
 #include "models/pdfmodel.h"
+#include "delegates/syncbadge.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QFontMetrics>
@@ -31,6 +32,9 @@ void GridDelegate::paint(QPainter* painter,
     const QStringList tags  = index.data(PdfModel::TagsRole).toStringList();
     const QPixmap     thumb = qvariant_cast<QPixmap>(index.data(PdfModel::ThumbnailRole));
     const bool     removing = index.data(PdfModel::PendingRemovalRole).toBool();
+    const auto     syncState = static_cast<PdfModel::SyncState>(
+                                   index.data(PdfModel::SyncStateRole).toInt());
+    const bool     pendingMeta = index.data(PdfModel::PendingMetaRole).toBool();
 
     // A removal is a round trip that can fail, so the card is faded rather than
     // taken away — the user sees it is on its way out and can carry on.
@@ -43,6 +47,8 @@ void GridDelegate::paint(QPainter* painter,
     // ── Thumbnail ─────────────────────────────────────────────────────────────
     const QRect thumbRect(rect.left(), rect.top(), rect.width(), kThumbHeight);
     drawThumbnail(painter, thumbRect, thumb);
+    SyncBadge::paint(painter, thumbRect.adjusted(0, 0, -kPadding, -kPadding),
+                     syncState, pendingMeta);
 
     // ── Separator ─────────────────────────────────────────────────────────────
     painter->setPen(QPen(QColor(0x3a, 0x3d, 0x42), 1));

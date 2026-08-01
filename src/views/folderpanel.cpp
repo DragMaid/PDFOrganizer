@@ -136,6 +136,20 @@ void FolderPanel::buildTagChips()
     layout->setSpacing(4);
 
     const QStringList tags = m_tagModel->allTags();
+
+    // A tag can leave the vocabulary between two builds — deleted here, renamed
+    // by a teammate — and an active filter naming one that is gone would quietly
+    // hide every file with no chip left on screen to untick.
+    QStringList stillReal;
+    for (const QString& tag : m_activeTags) {
+        if (tags.contains(tag, Qt::CaseInsensitive))
+            stillReal << tag;
+    }
+    if (stillReal.size() != m_activeTags.size()) {
+        m_activeTags = stillReal;
+        emit tagsSelected(m_activeTags);
+    }
+
     for (const QString& tag : tags) {
         auto* chip = new QPushButton(tag, m_tagContainer);
         chip->setCheckable(true);
@@ -172,6 +186,22 @@ void FolderPanel::buildTagChips()
 void FolderPanel::refresh()
 {
     buildTagChips();
+}
+
+void FolderPanel::clearTagFilter()
+{
+    if (m_activeTags.isEmpty()) {
+        // Still rebuild: the caller asked because the vocabulary moved, and the
+        // chips are what the vocabulary looks like.
+        buildTagChips();
+        return;
+    }
+
+    m_activeTags.clear();
+    // Chips are rebuilt rather than unticked one by one — the reason the filter
+    // is being cleared is usually that one of them no longer exists.
+    buildTagChips();
+    emit tagsSelected(m_activeTags);
 }
 
 void FolderPanel::onFolderClicked(const QModelIndex& idx)

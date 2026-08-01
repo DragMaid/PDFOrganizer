@@ -14,6 +14,7 @@ class QSplitter;
 class QAction;
 class QListWidget;
 class QListWidgetItem;
+class QProgressBar;
 class QPushButton;
 class QTabWidget;
 class QTextEdit;
@@ -186,6 +187,50 @@ private:
     void showActivity(const QString& message, int autoClearMs = 0);
     void clearActivity();
 
+    // ── Transfers running in the background ───────────────────────────────────
+    //
+    //  Moving files used to hold a modal progress dialog over the window until
+    //  it finished, which made a folder of large PDFs into a decision to stop
+    //  working. A transfer now reports itself in the status bar and nothing
+    //  else: the user keeps browsing, tagging, reading and searching while it
+    //  runs, and may stop it whenever they like.
+    //
+    //  Exactly one runs at a time. That is not a limitation of the plumbing but
+    //  the point of it — one progress bar can only honestly describe one thing,
+    //  and a second Sync started on top of the first would be doing the work
+    //  the first is already doing.
+
+    /// One upload or download run, in progress.
+    struct Transfer
+    {
+        bool    active = false;
+        int     groupId = -1;
+        QString groupName;
+        QString phase;      ///< "Uploading" / "Downloading"
+        QString detail;     ///< The file currently in flight.
+        int     done = 0;
+        int     total = 0;
+        /// Files already finished by an earlier phase. A sync uploads and then
+        /// downloads over one bar, and the download half counts from zero — so
+        /// the bar adds this to keep going forwards rather than starting again.
+        int     base = 0;
+        bool    canceled = false;
+    };
+
+    /// Put the status-bar transfer row up. Refuses — and says why — when one is
+    /// already running, so a double-clicked Sync cannot start a second.
+    bool beginTransfer(int groupId, const QString& groupName,
+                       const QString& phase, int total);
+    /// Move it on one file. @p phase may change mid-run: a sync uploads first
+    /// and downloads afterwards, and both halves share one bar.
+    void stepTransfer(const QString& phase, const QString& detail, int done);
+    void endTransfer();
+    void updateTransferRow();
+    /// True once the user has pressed Stop. The transfer chains check this
+    /// between files, exactly as they used to check the progress dialog.
+    [[nodiscard]] bool transferCanceled() const { return m_transfer.canceled; }
+    [[nodiscard]] bool transferActive()   const { return m_transfer.active; }
+
     // ── Session ───────────────────────────────────────────────────────────────
     void restoreSessionOrPrompt();
     void onSignedIn();
@@ -241,6 +286,11 @@ private:
     /// two halves are matched by content hash — the same identity the backend
     /// keys files by — and a file this machine no longer holds is a download,
     /// exactly like a file nobody has uploaded yet is an upload.
+    ///
+    /// Only *files* appear here. Tags and notes are deliberately absent: they
+    /// are sent the moment they are written and, when that is impossible, they
+    /// wait quietly until the file they belong to goes up. Neither case is
+    /// something to ask the user to press a button about.
     struct SyncPlan
     {
         QList<ApiFile> toUpload;    ///< Held here; the group has no copy stored.
@@ -249,8 +299,6 @@ private:
         /// They become uploads the moment they are registered, so they count
         /// towards the "ahead" number from the start.
         int unregistered = 0;
-        /// Tag and note edits made offline that still have to go up.
-        int pendingMetadata = 0;
 
         [[nodiscard]] int uploads()   const { return toUpload.size() + unregistered; }
         [[nodiscard]] int downloads() const { return toDownload.size(); }
@@ -267,11 +315,10 @@ private:
     {
         int  uploads      = 0;
         int  downloads    = 0;
-        int  pendingMeta  = 0;
         bool known        = false;  ///< False until the first reply lands.
 
         [[nodiscard]] bool behind()   const { return downloads > 0; }
-        [[nodiscard]] bool ahead()    const { return uploads > 0 || pendingMeta > 0; }
+        [[nodiscard]] bool ahead()    const { return uploads > 0; }
         [[nodiscard]] bool inSync()   const { return !behind() && !ahead(); }
         /// "↑2 ↓1", or empty when there is nothing to say.
         [[nodiscard]] QString badge() const;
@@ -293,20 +340,54 @@ private:
     /// Redraw everything that reports how far out of sync anything is: the
     /// sidebar badges, the status-bar banner and the window title.
     void updateSyncIndicators();
-    /// Something local changed that makes the counts stale — recount. Without a
-    /// group id this means the active one.
-    void markSyncPending();
+    /// A file appeared or disappeared in @p groupId's folder, so the counts are
+    /// no longer a fact — recount. Only files reach here: a tag or a note never
+    /// makes a folder out of sync.
     void markSyncPending(int groupId);
     /// Counts for @p groupId, or an all-zero unknown entry.
     [[nodiscard]] SyncCounts countsFor(int groupId) const;
     /// The group the status-bar banner is currently offering to sync, or -1.
     [[nodiscard]] int mostOutOfSyncGroup() const;
 
+    /// Restate every file's dot in @p groupId's folder from what the server just
+    /// said it holds. The counts answer "how far behind is this folder"; this
+    /// answers "which of these PDFs is the folder behind on", which is the
+    /// question someone looking at a file list is actually asking.
+    void applyFileSyncStates(int groupId, const ApiSyncStatus& status);
+    /// The same for one file, without a round trip — used while a transfer is
+    /// moving it and the server has not been asked again yet.
+    void markFileSyncState(const QString& filePath, int state,
+                           const QString& detail);
+    /// Local ids of files in @p groupId's folder that have tags or notes waiting.
+    [[nodiscard]] QSet<int> filesWithPendingMetadata(const QString& folderPath) const;
+    /// Restate the small "unsent edits" dot for every file in @p folderPath.
+    void refreshPendingMetaMarks(const QString& folderPath);
+
     void syncPendingData(int groupId, std::function<void()> onDone);
     void syncNextPendingFile(int groupId, QStringList pending, std::function<void()> onDone);
     void syncNextPendingTag(int groupId, QList<int> pendingFiles, std::function<void()> onDone);
     void syncNextPendingNote(int groupId, QList<int> pendingFiles, std::function<void()> onDone);
     void syncNotesForFile(int groupId, int remoteFileId, int localFileId, QStringList notes, std::function<void()> onDone);
+
+    // ── Tags and notes, which are not a sync ──────────────────────────────────
+    //
+    //  Writing a tag or a note is an edit, not a transfer. It goes up on its own
+    //  the moment it is made, and the Sync button never lights up because of
+    //  one. When it cannot go up — signed out, or the group has never been told
+    //  about the file — it waits on this machine and rides along with the file
+    //  itself, which is the only thing a sync was ever really about.
+
+    /// Send @p tags for @p filePath to its group now, in the background.
+    void pushFileTags(int groupId, const QString& filePath, int localFileId,
+                      const QStringList& tags);
+    /// Backend file id for @p filePath in @p groupId, or -1 when the group has
+    /// not been told about it. Unlike resolveRemoteFile() this never registers
+    /// anything: asking whether a file is known must not be what makes it known.
+    [[nodiscard]] int knownRemoteFileId(int groupId, const QString& filePath);
+    /// The local path @p remoteFileId maps to inside @p groupId, or empty.
+    [[nodiscard]] QString localPathForRemoteFile(int groupId, int remoteFileId);
+    /// Re-fetch one file's tags after a teammate changed them.
+    void refreshRemoteFileTags(int groupId, int remoteFileId);
 
     /// SHA-256 for a local file, cached in SQLite so a file is hashed once.
     QString contentHashFor(const QString& filePath);
@@ -334,11 +415,14 @@ private:
 
     /// Carry out @p plan: uploads first, then downloads, then one summary.
     void runSync(int groupId, const ApiGroup& group, const SyncPlan& plan);
+    /// Mark @p groupId's sync as finished, whichever way it ended.
+    void finishSync(int groupId);
 
     /// Send each pending file's bytes, then hand the totals to @p onDone —
-    /// which is where the download half of a sync picks up.
+    /// which is where the download half of a sync picks up. Progress goes to
+    /// the status-bar transfer row; the caller must have opened it already.
     void uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
-                    int skipped, class QProgressDialog* progress,
+                    int skipped,
                     std::function<void(int uploaded, int skipped,
                                        bool canceled)> onDone);
 
@@ -367,7 +451,7 @@ private:
     /// so the ending is theirs to write.
     void downloadNext(int groupId, const QString& folderPath,
                       QList<ApiFile> pending, QStringList taken, int downloaded,
-                      int skipped, class QProgressDialog* progress,
+                      int skipped,
                       std::function<void(int downloaded, int skipped,
                                          bool canceled)> onDone);
 
@@ -449,6 +533,14 @@ private:
     /// Separate from m_scanLabel so a scan finishing cannot wipe it.
     QLabel*          m_activityLabel = nullptr;
 
+    // ── The transfer row ──────────────────────────────────────────────────────
+    /// "↑ Uploading notes.pdf — 3 of 8" plus a bar and a Stop button, hidden
+    /// unless something is actually moving. This is the whole of the UI a
+    /// transfer gets: nothing is greyed out and no window is blocked.
+    QLabel*          m_transferLabel  = nullptr;
+    QProgressBar*    m_transferBar    = nullptr;
+    QPushButton*     m_transferStop   = nullptr;
+
     // ── Backend state ─────────────────────────────────────────────────────────
     QList<ApiGroup>  m_groups;
     QList<ApiNote>   m_notes;          ///< Notes for the selected file
@@ -471,6 +563,12 @@ private:
     /// Groups with a request already out, so a burst of events (a scan, or a
     /// busy group) does not queue one round trip per event.
     QSet<int>        m_syncInFlight;
+    /// The group being synced right now, or -1. Pressing Sync again — on the
+    /// button, on the status-bar banner, or on both in quick succession — says
+    /// so instead of starting the same work a second time.
+    int              m_syncingGroup = -1;
+    /// The transfer the status bar is currently describing.
+    Transfer         m_transfer;
 
     // ── Removals in flight ────────────────────────────────────────────────────
     /// Local paths whose removal request has not come back yet. Nothing is

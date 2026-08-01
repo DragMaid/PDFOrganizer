@@ -56,7 +56,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QProgressDialog>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSettings>
@@ -378,11 +378,127 @@ void MainWindow::initStatusBar() {
     onSyncGroup();
   });
 
+  // ── The transfer row ──────────────────────────────────────────────────────
+  // Files move here rather than behind a modal dialog. Everything about this
+  // row is designed to be ignorable: it appears without stealing focus, it
+  // never disables anything, and the only control on it is a way out.
+  m_transferLabel = new QLabel(this);
+  m_transferLabel->setObjectName(QStringLiteral("transferLabel"));
+  m_transferLabel->hide();
+
+  m_transferBar = new QProgressBar(this);
+  m_transferBar->setObjectName(QStringLiteral("transferBar"));
+  m_transferBar->setTextVisible(false);
+  m_transferBar->setFixedWidth(120);
+  m_transferBar->setFixedHeight(12);
+  m_transferBar->hide();
+
+  m_transferStop = new QPushButton(QStringLiteral("Stop"), this);
+  m_transferStop->setObjectName(QStringLiteral("transferStop"));
+  m_transferStop->setFlat(true);
+  m_transferStop->setCursor(Qt::PointingHandCursor);
+  m_transferStop->setToolTip(
+      QStringLiteral("Stop after the file currently in flight. Whatever has "
+                     "already transferred is kept."));
+  m_transferStop->hide();
+  connect(m_transferStop, &QPushButton::clicked, this, [this]() {
+    if (!m_transfer.active)
+      return;
+    m_transfer.canceled = true;
+    // The chain notices between files, so say the request landed rather than
+    // leaving the button looking unpressed until the current file finishes.
+    m_transferStop->setEnabled(false);
+    m_transferLabel->setText(QStringLiteral("Stopping after this file…"));
+  });
+
   statusBar()->addWidget(m_statusLabel);
   statusBar()->addWidget(m_activityLabel, 1);
+  statusBar()->addPermanentWidget(m_transferLabel);
+  statusBar()->addPermanentWidget(m_transferBar);
+  statusBar()->addPermanentWidget(m_transferStop);
   statusBar()->addPermanentWidget(m_syncBanner);
   statusBar()->addPermanentWidget(m_scanLabel);
   statusBar()->addPermanentWidget(m_userLabel);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Transfers running in the background
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool MainWindow::beginTransfer(int groupId, const QString &groupName,
+                               const QString &phase, int total) {
+  // The guard that makes a mashed Sync button harmless. One bar can describe
+  // one transfer, and a second run over the same files would only race the
+  // first, so the answer is to say what is already happening.
+  if (m_transfer.active) {
+    showActivity(QStringLiteral("Already %1 in '%2' — %3 of %4 done")
+                     .arg(m_transfer.phase.toLower(), m_transfer.groupName)
+                     .arg(m_transfer.done)
+                     .arg(m_transfer.total),
+                 6000);
+    return false;
+  }
+
+  m_transfer = Transfer{};
+  m_transfer.active = true;
+  m_transfer.groupId = groupId;
+  m_transfer.groupName = groupName;
+  m_transfer.phase = phase;
+  m_transfer.total = total;
+
+  m_transferStop->setEnabled(true);
+  m_transferLabel->show();
+  m_transferBar->show();
+  m_transferStop->show();
+  updateTransferRow();
+  return true;
+}
+
+void MainWindow::stepTransfer(const QString &phase, const QString &detail,
+                              int done) {
+  if (!m_transfer.active)
+    return;
+  m_transfer.phase = phase;
+  m_transfer.detail = detail;
+  m_transfer.done = m_transfer.base + done;
+  updateTransferRow();
+}
+
+void MainWindow::endTransfer() {
+  m_transfer = Transfer{};
+  m_transferLabel->hide();
+  m_transferBar->hide();
+  m_transferStop->hide();
+  // The title carries the transfer while it runs; hand it back to whatever the
+  // sync indicators want to say about the folders now that it is over.
+  updateSyncIndicators();
+}
+
+void MainWindow::updateTransferRow() {
+  if (!m_transfer.active)
+    return;
+
+  const bool up = m_transfer.phase.startsWith(QLatin1String("Upload"));
+  QString text = QStringLiteral("%1 %2 in '%3'")
+                     .arg(up ? QStringLiteral("↑") : QStringLiteral("↓"),
+                          m_transfer.phase.toLower(), m_transfer.groupName);
+  if (!m_transfer.detail.isEmpty())
+    text += QStringLiteral(" — %1").arg(m_transfer.detail);
+  m_transferLabel->setText(text);
+  m_transferLabel->setToolTip(
+      QStringLiteral("%1 of %2 file(s). You can carry on working; this "
+                     "finishes on its own.")
+          .arg(m_transfer.done)
+          .arg(m_transfer.total));
+
+  m_transferBar->setRange(0, qMax(1, m_transfer.total));
+  m_transferBar->setValue(m_transfer.done);
+
+  // A minimised window should still be able to say how far along it is.
+  setWindowTitle(QStringLiteral("PDF Organizer  —  %1 %2/%3")
+                     .arg(m_transfer.phase)
+                     .arg(m_transfer.done)
+                     .arg(m_transfer.total));
 }
 
 void MainWindow::showActivity(const QString &message, int autoClearMs) {
@@ -490,6 +606,26 @@ void MainWindow::connectSignals() {
   // Someone else changed something shared, so this machine's ahead/behind
   // counts are stale — the indicators say so without anyone clicking anything.
   connect(m_api, &ApiClient::remoteEvent, this, &MainWindow::onRemoteEvent);
+
+  // A tag going away is the one vocabulary change that can leave the UI lying:
+  // the chip disappears but the filter behind it does not, so the file list
+  // silently empties with nothing left on screen to untick. Whichever route the
+  // deletion arrived by — the tag manager here, or a teammate's over the
+  // WebSocket — it lands in applyRemoteVocabulary, so it is handled once.
+  connect(m_tagCtrl, &TagController::vocabularyShrank, this,
+          [this](const QStringList &removed) {
+            m_folderPanel->clearTagFilter();
+            refreshDetailPane();
+            updateStatusBar();
+            showActivity(
+                removed.size() == 1
+                    ? QStringLiteral("Tag '%1' was deleted — tag filter cleared")
+                          .arg(removed.first())
+                    : QStringLiteral(
+                          "%1 tags were deleted — tag filter cleared")
+                          .arg(removed.size()),
+                6000);
+          });
 
   // Tag model changes → refresh folder panel chips
   connect(m_tagModel, &QAbstractItemModel::modelReset, m_folderPanel,
@@ -738,12 +874,120 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
   if (!extra.isEmpty() && !selected.contains(extra, Qt::CaseInsensitive))
     selected << extra;
 
+  // On screen straight away. Tagging is an edit the user made, not a request
+  // they submitted, so the UI agrees with them before the network is involved
+  // at all — and pushFileTags reconciles it with whatever actually landed.
   m_db->setFileTags(f.id, selected);
-  m_db->setPendingTags(f.id, true);
   m_tagCtrl->applyRemoteFileTags(filePath, selected);
-  reloadTagVocabulary();
   refreshDetailPane();
-  markSyncPending();
+
+  pushFileTags(groupId, filePath, f.id, selected);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Tags and notes, which are not a sync
+// ─────────────────────────────────────────────────────────────────────────────
+
+int MainWindow::knownRemoteFileId(int groupId, const QString &filePath) {
+  if (groupId < 0 || filePath.isEmpty())
+    return -1;
+  const QString hash = contentHashFor(filePath);
+  if (hash.isEmpty())
+    return -1;
+  return m_db->remoteFileId(groupId, hash);
+}
+
+void MainWindow::pushFileTags(int groupId, const QString &filePath,
+                              int localFileId, const QStringList &tags) {
+  // Held here until the file itself reaches the group. Note what is *not*
+  // happening: the file is not registered, nothing is uploaded, and the Sync
+  // button does not light up. A tag is not a reason to move a PDF.
+  const auto queue = [this, localFileId, filePath]() {
+    m_db->setPendingTags(localFileId, true);
+    m_pdfModel->setPendingMeta(filePath, true);
+  };
+
+  if (groupId < 0 || !m_api->isAuthenticated()) {
+    queue();
+    showActivity(QStringLiteral("Tags saved on this machine — they go up with "
+                                "this file on the next sync"),
+                 6000);
+    return;
+  }
+
+  const int remoteFileId = knownRemoteFileId(groupId, filePath);
+  if (remoteFileId < 0) {
+    queue();
+    showActivity(QStringLiteral("Tags saved on this machine — '%1' has not "
+                                "been shared with the group yet")
+                     .arg(QFileInfo(filePath).fileName()),
+                 6000);
+    return;
+  }
+
+  // Pending until the server confirms, so a reply that never comes leaves the
+  // edit queued rather than lost.
+  queue();
+  showActivity(QStringLiteral("Saving tags for %1…")
+                   .arg(QFileInfo(filePath).fileName()));
+
+  m_api->setFileTags(
+      groupId, remoteFileId, tags,
+      [this, localFileId, filePath](const QList<ApiTag> &applied) {
+        m_db->setPendingTags(localFileId, false);
+        m_pdfModel->setPendingMeta(filePath, false);
+
+        // What the server holds, which is not always what was sent: a teammate
+        // may have added one in the same moment.
+        QStringList names;
+        for (const ApiTag &tag : applied)
+          names << tag.name;
+        m_tagCtrl->applyRemoteFileTags(filePath, names);
+        reloadTagVocabulary();
+        if (filePath == m_selectedFilePath)
+          refreshDetailPane();
+        showActivity(QStringLiteral("✓ Tags saved"), 4000);
+      },
+      [this, filePath](const ApiError &error) {
+        // Still on this machine, still on screen, still going up with the next
+        // sync — so an unreachable server is worth a line, not a modal.
+        showActivity(QStringLiteral("Tags for %1 saved here — they go up on "
+                                    "the next sync")
+                         .arg(QFileInfo(filePath).fileName()),
+                     8000);
+        if (!error.isNetworkFailure())
+          showError(error);
+      });
+}
+
+QString MainWindow::localPathForRemoteFile(int groupId, int remoteFileId) {
+  if (groupId < 0 || remoteFileId < 0)
+    return {};
+  const QString folderPath = m_db->folderForGroup(groupId);
+  if (folderPath.isEmpty())
+    return {};
+
+  for (const QString &filePath : filesIn(folderPath)) {
+    if (knownRemoteFileId(groupId, filePath) == remoteFileId)
+      return filePath;
+  }
+  return {};
+}
+
+void MainWindow::refreshRemoteFileTags(int groupId, int remoteFileId) {
+  const QString filePath = localPathForRemoteFile(groupId, remoteFileId);
+  if (filePath.isEmpty())
+    return;
+
+  m_api->listFileTags(groupId, remoteFileId,
+                      [this, filePath](const QList<ApiTag> &tags) {
+                        QStringList names;
+                        for (const ApiTag &tag : tags)
+                          names << tag.name;
+                        m_tagCtrl->applyRemoteFileTags(filePath, names);
+                        if (filePath == m_selectedFilePath)
+                          refreshDetailPane();
+                      });
 }
 
 void MainWindow::onRemoveFileRequested(const QString &filePath) {
@@ -1054,6 +1298,10 @@ void MainWindow::onSignOut() {
   m_syncStale.clear();
   m_syncInFlight.clear();
 
+  // A green dot means "the group has this"; signed out there is no group it
+  // could be true of, so every dot goes with the counts.
+  m_pdfModel->clearSyncStates();
+
   m_userLabel->setText(QStringLiteral("Not signed in"));
   setCollaborationEnabled(false);
   refreshDetailPane();
@@ -1081,8 +1329,23 @@ void MainWindow::onRemoteEvent(const ApiRemoteEvent &event) {
 
   // A vocabulary change is global to the sidebar — the chips are one union
   // drawn from every group — so it is reloaded whichever group it happened in.
+  //
+  // Deleting a tag is the case that needs the most care from here. The chips
+  // rebuild themselves, but a filter still pinned to the tag that just vanished
+  // would empty the file list with nothing on screen to explain it, and every
+  // file carrying that tag would keep drawing it. Both are handled where the
+  // vocabulary actually shrinks — see TagController::vocabularyShrank, which
+  // the local tag manager reaches by exactly the same route.
   if (event.touchesTags()) {
     reloadTagVocabulary();
+
+    // A tag added to or taken off one file changes only that file, and the
+    // event says which: worth re-reading, and not worth reloading anything else.
+    if (event.type == QLatin1String(ApiRemoteEvent::FileTagsChanged) &&
+        event.fileId >= 0) {
+      refreshRemoteFileTags(event.groupId, event.fileId);
+    }
+
     if (isActiveGroup)
       refreshDetailPane();
   }
@@ -1412,19 +1675,95 @@ MainWindow::SyncPlan MainWindow::planSync(int groupId,
       ++plan.unregistered;
   }
 
-  // Tag and note edits are group-scoped too, so only the ones belonging to this
-  // folder's files count towards this group's number.
+  // Tag and note edits are deliberately not counted. They are sent when they
+  // are written, and when they cannot be they wait for their file — so they
+  // are never a reason to tell someone their folder needs syncing.
+  return plan;
+}
+
+QSet<int> MainWindow::filesWithPendingMetadata(const QString &folderPath) const {
   QSet<int> pendingIds;
+  if (folderPath.isEmpty())
+    return pendingIds;
+
+  QSet<int> anywhere;
   for (const int fileId : m_db->getFilesWithPendingTags())
-    pendingIds.insert(fileId);
+    anywhere.insert(fileId);
   for (const int fileId : m_db->getFilesWithPendingNotes())
-    pendingIds.insert(fileId);
+    anywhere.insert(fileId);
+
   for (const PdfFile &file : m_pdfModel->allFiles()) {
-    if (file.folderPath == folderPath && pendingIds.contains(file.id))
-      ++plan.pendingMetadata;
+    if (file.folderPath == folderPath && anywhere.contains(file.id))
+      pendingIds.insert(file.id);
+  }
+  return pendingIds;
+}
+
+void MainWindow::refreshPendingMetaMarks(const QString &folderPath) {
+  if (folderPath.isEmpty())
+    return;
+  const QSet<int> pending = filesWithPendingMetadata(folderPath);
+  for (const PdfFile &file : m_pdfModel->allFiles()) {
+    if (file.folderPath == folderPath)
+      m_pdfModel->setPendingMeta(file.filePath, pending.contains(file.id));
+  }
+}
+
+void MainWindow::markFileSyncState(const QString &filePath, int state,
+                                   const QString &detail) {
+  if (filePath.isEmpty())
+    return;
+  m_pdfModel->setSyncState(filePath, static_cast<PdfModel::SyncState>(state),
+                           detail);
+}
+
+void MainWindow::applyFileSyncStates(int groupId,
+                                     const ApiSyncStatus &status) {
+  const QString folderPath = m_db->folderForGroup(groupId);
+  if (folderPath.isEmpty())
+    return;
+
+  const ApiGroup group = groupById(groupId);
+  const QString groupName =
+      group.isValid() ? group.name : groupNameForFolder(folderPath);
+
+  QSet<QString> uploaded;
+  QSet<QString> registered;
+  for (const ApiFile &file : status.files) {
+    registered.insert(file.contentHash);
+    if (file.uploaded)
+      uploaded.insert(file.contentHash);
   }
 
-  return plan;
+  const QSet<int> pendingMeta = filesWithPendingMetadata(folderPath);
+
+  for (const PdfFile &file : m_pdfModel->allFiles()) {
+    if (file.folderPath != folderPath)
+      continue;
+
+    // A file being moved right now owns its own dot until the transfer ends;
+    // overwriting it here would flicker it back to amber mid-upload.
+    if (m_pdfModel->syncState(file.filePath) != PdfModel::SyncTransferring) {
+      const QString hash = contentHashFor(file.filePath);
+      if (uploaded.contains(hash)) {
+        markFileSyncState(file.filePath, PdfModel::SyncSynced,
+                          QStringLiteral("Stored for '%1'.").arg(groupName));
+      } else if (registered.contains(hash)) {
+        markFileSyncState(
+            file.filePath, PdfModel::SyncLocalOnly,
+            QStringLiteral("Listed in '%1', but nobody has uploaded its "
+                           "contents yet — sync to send yours.")
+                .arg(groupName));
+      } else {
+        markFileSyncState(
+            file.filePath, PdfModel::SyncLocalOnly,
+            QStringLiteral("Only on this machine — sync '%1' to share it.")
+                .arg(groupName));
+      }
+    }
+
+    m_pdfModel->setPendingMeta(file.filePath, pendingMeta.contains(file.id));
+  }
 }
 
 // Deliberately git's vocabulary: ↑ is what this machine owes the group, ↓ is
@@ -1435,10 +1774,6 @@ QString MainWindow::SyncCounts::badge() const {
     parts << QStringLiteral("↑%1").arg(uploads);
   if (downloads > 0)
     parts << QStringLiteral("↓%1").arg(downloads);
-  // Tag and note edits have no count worth a number next to a folder name; a
-  // dot is enough to say "there is something to send".
-  if (parts.isEmpty() && pendingMeta > 0)
-    parts << QStringLiteral("•");
   return parts.join(QLatin1Char(' '));
 }
 
@@ -1453,10 +1788,6 @@ QString MainWindow::SyncCounts::describe() const {
     lines << QStringLiteral("↓ %1 file(s) to download — stored for the group, "
                             "missing from this folder")
                  .arg(downloads);
-  }
-  if (pendingMeta > 0) {
-    lines << QStringLiteral("• %1 file(s) with tag or note changes to send")
-                 .arg(pendingMeta);
   }
   if (lines.isEmpty()) {
     lines << (known ? QStringLiteral(
@@ -1511,9 +1842,12 @@ void MainWindow::refreshSyncCountsFor(int groupId, bool force) {
         SyncCounts counts;
         counts.uploads = plan.uploads();
         counts.downloads = plan.downloads();
-        counts.pendingMeta = plan.pendingMetadata;
         counts.known = true;
         m_syncCounts.insert(groupId, counts);
+
+        // The same reply answers the per-file question, so the dots are set
+        // from it rather than costing a second round trip.
+        applyFileSyncStates(groupId, status);
 
         updateSyncButton();
         updateSyncIndicators();
@@ -1556,11 +1890,33 @@ void MainWindow::updateSyncButton() {
   if (!m_syncBtn)
     return;
 
-  const SyncCounts counts = countsFor(activeGroupId());
+  const int groupId = activeGroupId();
+
+  // While this group is syncing the button stops being an invitation and
+  // becomes a status: pressing it again could only duplicate work in flight.
+  if (groupId >= 0 && groupId == m_syncingGroup) {
+    m_syncBtn->setText(QStringLiteral("Syncing…"));
+    m_syncBtn->setEnabled(false);
+    m_syncBtn->setToolTip(
+        QStringLiteral("This folder is syncing in the background. Carry on — "
+                       "the status bar shows how far along it is."));
+    return;
+  }
+
+  const SyncCounts counts = countsFor(groupId);
   const QString badge = counts.badge();
+  m_syncBtn->setEnabled(groupId >= 0);
   m_syncBtn->setText(badge.isEmpty() ? QStringLiteral("Sync")
                                      : QStringLiteral("Sync %1").arg(badge));
-  m_syncBtn->setToolTip(counts.describe());
+
+  QString tip = counts.describe();
+  if (m_syncingGroup >= 0) {
+    const ApiGroup busy = groupById(m_syncingGroup);
+    tip += QStringLiteral("\n\n'%1' is syncing right now; this one waits its "
+                          "turn.")
+               .arg(busy.isValid() ? busy.name : QStringLiteral("Another folder"));
+  }
+  m_syncBtn->setToolTip(tip);
 }
 
 int MainWindow::mostOutOfSyncGroup() const {
@@ -1572,8 +1928,7 @@ int MainWindow::mostOutOfSyncGroup() const {
   for (auto it = m_syncCounts.constBegin(); it != m_syncCounts.constEnd();
        ++it) {
     const SyncCounts &counts = it.value();
-    const int score =
-        counts.downloads * 1000 + counts.uploads * 10 + counts.pendingMeta;
+    const int score = counts.downloads * 1000 + counts.uploads;
     if (score > bestScore) {
       bestScore = score;
       best = it.key();
@@ -1603,11 +1958,16 @@ void MainWindow::updateSyncIndicators() {
   if (!m_syncBanner)
     return;
 
+  // A transfer in flight owns the title bar; it is saying something more
+  // immediate than "there is work waiting", and the two would fight over it.
+  const bool transferring = transferActive();
+
   const int groupId = mostOutOfSyncGroup();
   const ApiGroup group = groupById(groupId);
   if (groupId < 0 || !group.isValid()) {
     m_syncBanner->hide();
-    setWindowTitle(QStringLiteral("PDF Organizer"));
+    if (!transferring)
+      setWindowTitle(QStringLiteral("PDF Organizer"));
     return;
   }
 
@@ -1617,8 +1977,6 @@ void MainWindow::updateSyncIndicators() {
     parts << QStringLiteral("↓%1 to download").arg(counts.downloads);
   if (counts.uploads > 0)
     parts << QStringLiteral("↑%1 to upload").arg(counts.uploads);
-  if (parts.isEmpty() && counts.pendingMeta > 0)
-    parts << QStringLiteral("tag/note changes to send");
 
   // How many *other* groups are also behind, so one busy folder does not hide
   // the fact that three of them need attention.
@@ -1636,17 +1994,20 @@ void MainWindow::updateSyncIndicators() {
 
   m_syncBanner->setText(text);
   m_syncBanner->setToolTip(
-      QStringLiteral("%1\n\nClick to sync '%2' now. Nothing is transferred "
-                     "until you do.")
+      QStringLiteral("%1\n\nClick to sync '%2' now, in the background — you can "
+                     "keep working while it runs. Nothing is transferred until "
+                     "you do.")
           .arg(counts.describe(), group.name));
+  // Offering to start a second transfer on top of one already running would be
+  // an offer that cannot be honoured.
+  m_syncBanner->setEnabled(!transferring);
   m_syncBanner->show();
 
   // Marked in the title so a minimised window still says there is something
   // waiting.
-  setWindowTitle(QStringLiteral("PDF Organizer  •"));
+  if (!transferring)
+    setWindowTitle(QStringLiteral("PDF Organizer  •"));
 }
-
-void MainWindow::markSyncPending() { markSyncPending(activeGroupId()); }
 
 void MainWindow::markSyncPending(int groupId) {
   if (groupId < 0)
@@ -1835,47 +2196,45 @@ void MainWindow::onAddNote() {
   m_noteEdit->clear();
 
   // Keep it on this machine instead of sending it. Signed out, or a file this
-  // group has never been told about — either way there is nothing to attach a
-  // note to yet, and the next sync is what turns it into a real one.
-  const auto queue = [this, localFileId, body, groupId]() {
+  // group has never been told about — either way there is nowhere to attach a
+  // note yet, and it goes up with the file itself when that finally happens.
+  //
+  // Writing a note does not make the folder out of sync and does not light the
+  // Sync button up. A note is an edit, not a transfer.
+  const auto queue = [this, localFileId, filePath, body]() {
     m_db->savePendingNote(localFileId, body);
+    m_pdfModel->setPendingMeta(filePath, true);
     refreshNotes();
-    markSyncPending(groupId);
     showActivity(
-        QStringLiteral("Note saved on this machine — it goes up on the next "
-                       "sync"),
+        QStringLiteral("Note saved on this machine — it goes up with this file"),
         6000);
   };
 
-  if (!m_api->isAuthenticated()) {
+  // Deliberately *not* resolveRemoteFile: asking where to put a note must not
+  // be what pushes a file into the group. A note on a PDF nobody has shared
+  // waits for the PDF.
+  const int remoteFileId = knownRemoteFileId(groupId, filePath);
+  if (!m_api->isAuthenticated() || remoteFileId < 0) {
     queue();
     return;
   }
 
-  // Registering the file if this is the first thing ever attached to it is the
-  // point: a note on a file the group has not been told about has nowhere to
-  // live, and the user should not have to know that.
-  resolveRemoteFile(
-      groupId, filePath,
-      [this, groupId, filePath, body, queue](int remoteFileId) {
-        m_api->createNote(
-            groupId, remoteFileId, body,
-            [this, filePath](const ApiNote &) {
-              // Straight back from the server, so the note appears with its
-              // real author and timestamp rather than a local guess.
-              if (filePath == m_selectedFilePath)
-                refreshNotes();
-              showActivity(QStringLiteral("✓ Note added"), 4000);
-            },
-            [this, queue](const ApiError &error) {
-              // The note is not lost because the network was: it goes into the
-              // same queue an offline note would.
-              queue();
-              if (!error.isNetworkFailure())
-                showError(error);
-            });
+  m_api->createNote(
+      groupId, remoteFileId, body,
+      [this, filePath](const ApiNote &) {
+        // Straight back from the server, so the note appears with its real
+        // author and timestamp rather than a local guess.
+        if (filePath == m_selectedFilePath)
+          refreshNotes();
+        showActivity(QStringLiteral("✓ Note added"), 4000);
       },
-      [queue](const ApiError &) { queue(); });
+      [this, queue](const ApiError &error) {
+        // The note is not lost because the network was: it goes into the same
+        // queue an offline note would.
+        queue();
+        if (!error.isNetworkFailure())
+          showError(error);
+      });
 }
 
 void MainWindow::refreshNotes() {
@@ -2420,39 +2779,38 @@ void MainWindow::adoptJoinedFolder(const QString &folderPath,
       return;
     }
 
-    auto *progress = new QProgressDialog(
-        QStringLiteral("Downloading files from '%1'…").arg(group.name),
-        QStringLiteral("Cancel"), 0, pending.size(), this);
-    progress->setWindowModality(Qt::WindowModal);
-    progress->setMinimumDuration(0);
-    progress->setValue(0);
+    // Same background row a sync uses. Joining a folder of a hundred PDFs is
+    // exactly the case where being pinned to a modal is worst, and the folder
+    // is usable as soon as the first files land.
+    if (!beginTransfer(group.id, group.name, QStringLiteral("Downloading"),
+                       pending.size())) {
+      // Something else is already moving files; the mapping is stored, so
+      // syncing the folder later finishes the job.
+      watchJoinedFolder(folderPath);
+      return;
+    }
 
     // Existing names are off limits so a download never overwrites a file
     // that was already there.
     downloadNext(
-        group.id, folderPath, pending, present, 0, 0, progress,
-        [this, folderPath](int downloaded, int skipped, bool canceled) {
-          QString message = QStringLiteral("Downloaded %1 file(s) into:\n\n%2")
-                                .arg(downloaded)
-                                .arg(QDir::toNativeSeparators(folderPath));
-          if (skipped > 0) {
-            message +=
-                QStringLiteral(
-                    "\n\n%1 file(s) were skipped: they are registered in "
-                    "the group but nobody has uploaded their contents yet. "
-                    "They arrive once a member who holds them runs Sync.")
-                    .arg(skipped);
-          }
-          if (canceled) {
-            message += QStringLiteral(
-                "\n\nThe rest were not downloaded. Sync the folder to "
-                "finish.");
-          }
+        group.id, folderPath, pending, present, 0, 0,
+        [this, folderPath, group](int downloaded, int skipped, bool canceled) {
+          endTransfer();
 
-          QMessageBox::information(this,
-                                   canceled ? QStringLiteral("Download Stopped")
-                                            : QStringLiteral("Folder Synced"),
-                                   message);
+          QStringList parts;
+          parts << QStringLiteral("↓%1 downloaded").arg(downloaded);
+          if (skipped > 0) {
+            parts << QStringLiteral("%1 not uploaded by anyone yet")
+                         .arg(skipped);
+          }
+          if (canceled)
+            parts << QStringLiteral("stopped early — sync to finish");
+
+          showActivity(QStringLiteral("%1 '%2' — %3")
+                           .arg(canceled ? QStringLiteral("⏹ Stopped joining")
+                                         : QStringLiteral("✓ Joined"),
+                                group.name, parts.join(QStringLiteral(", "))),
+                       10000);
 
           // Whatever arrived is real and worth keeping, so the folder is
           // adopted even after a cancel or a failure.
@@ -2513,26 +2871,22 @@ QString MainWindow::localNameFor(const ApiFile &file,
 void MainWindow::downloadNext(int groupId, const QString &folderPath,
                               QList<ApiFile> pending, QStringList taken,
                               int downloaded, int skipped,
-                              QProgressDialog *progress,
                               std::function<void(int, int, bool)> onDone) {
   const int done = downloaded + skipped;
 
-  if (pending.isEmpty() || progress->wasCanceled()) {
-    const bool canceled = progress->wasCanceled() && !pending.isEmpty();
-    progress->close();
-    progress->deleteLater();
+  if (pending.isEmpty() || transferCanceled()) {
+    const bool canceled = transferCanceled() && !pending.isEmpty();
     onDone(downloaded, skipped, canceled);
     return;
   }
 
   const ApiFile file = pending.takeFirst();
-  progress->setValue(done);
-  progress->setLabelText(QStringLiteral("Downloading %1…").arg(file.fileName));
+  stepTransfer(QStringLiteral("Downloading"), file.fileName, done);
 
   // Nothing to fetch: registered in the group, but its bytes were never synced.
   if (!file.uploaded) {
     downloadNext(groupId, folderPath, pending, taken, downloaded, skipped + 1,
-                 progress, onDone);
+                 onDone);
     return;
   }
 
@@ -2542,8 +2896,8 @@ void MainWindow::downloadNext(int groupId, const QString &folderPath,
 
   m_api->downloadFile(
       groupId, file.id, localPath,
-      [this, groupId, folderPath, pending, taken, downloaded, skipped, progress,
-       file, localPath, onDone]() {
+      [this, groupId, folderPath, pending, taken, downloaded, skipped, file,
+       localPath, onDone]() {
         // Registering the file again after the scan would mean re-hashing it
         // and a round trip per file; both are already known, so they are cached
         // now.
@@ -2551,21 +2905,23 @@ void MainWindow::downloadNext(int groupId, const QString &folderPath,
         m_db->storeHash(localPath, file.contentHash, info.size(),
                         info.lastModified());
         m_db->storeRemoteFileId(groupId, file.contentHash, file.id);
+        // The scan that turns it into a row has not run yet, so this is
+        // remembered rather than drawn — applyFileSyncStates picks it up.
+        markFileSyncState(localPath, PdfModel::SyncSynced,
+                          QStringLiteral("Stored for the group."));
 
         downloadNext(groupId, folderPath, pending, taken, downloaded + 1,
-                     skipped, progress, onDone);
+                     skipped, onDone);
       },
-      [this, groupId, folderPath, pending, taken, downloaded, skipped, progress,
-       file, onDone](const ApiError &error) {
+      [this, groupId, folderPath, pending, taken, downloaded, skipped, file,
+       onDone](const ApiError &error) {
         // One file the group never uploaded should not end the whole download;
         // anything else means the next file would fail the same way.
         if (error.code == QLatin1String(ApiError::NotUploaded)) {
           downloadNext(groupId, folderPath, pending, taken, downloaded,
-                       skipped + 1, progress, onDone);
+                       skipped + 1, onDone);
           return;
         }
-        progress->close();
-        progress->deleteLater();
         showError(error);
         // Whatever did arrive is real and worth keeping, so the caller still
         // gets the totals — a later Sync picks up the rest.
@@ -2583,14 +2939,56 @@ void MainWindow::onSyncGroup() {
   if (!group.isValid())
     return;
 
+  // The spam guard, and the reason it lives here rather than on the button: the
+  // status-bar banner starts a sync too, and a run can be well under way before
+  // any transfer has opened — registering files and flushing queued tags takes
+  // round trips of its own. Both entry points meet at this line.
+  if (m_syncingGroup == groupId) {
+    showActivity(
+        QStringLiteral("'%1' is already syncing — this is it").arg(group.name),
+        5000);
+    return;
+  }
+  if (m_syncingGroup >= 0 || transferActive()) {
+    // Name the folder that is holding things up. A transfer knows its own name
+    // even when no sync owns it — joining a shared folder downloads too.
+    const ApiGroup busy = groupById(m_syncingGroup);
+    QString busyName = busy.isValid() ? busy.name : m_transfer.groupName;
+    if (busyName.isEmpty())
+      busyName = QStringLiteral("Another folder");
+    showActivity(QStringLiteral("'%1' is busy right now — try '%2' again once "
+                                "it has finished")
+                     .arg(busyName, group.name),
+                 6000);
+    return;
+  }
+
+  m_syncingGroup = groupId;
+  updateSyncButton();
+  showActivity(QStringLiteral("Syncing '%1'…").arg(group.name));
+
   // Local work first — registrations, then tags and notes — so the status we
   // then ask for already accounts for everything this machine was sitting on.
+  // This is also what turns a queued tag into a real one: the file gets
+  // registered here, and its waiting edits go up immediately behind it.
   syncPendingData(groupId, [this, groupId, group]() {
-    m_api->syncStatus(groupId,
-                      [this, groupId, group](const ApiSyncStatus &status) {
-                        runSync(groupId, group, planSync(groupId, status));
-                      });
+    m_api->syncStatus(
+        groupId,
+        [this, groupId, group](const ApiSyncStatus &status) {
+          applyFileSyncStates(groupId, status);
+          runSync(groupId, group, planSync(groupId, status));
+        },
+        [this, groupId](const ApiError &error) {
+          finishSync(groupId);
+          showError(error);
+        });
   });
+}
+
+void MainWindow::finishSync(int groupId) {
+  if (m_syncingGroup == groupId)
+    m_syncingGroup = -1;
+  updateSyncButton();
 }
 
 void MainWindow::runSync(int groupId, const ApiGroup &group,
@@ -2598,45 +2996,57 @@ void MainWindow::runSync(int groupId, const ApiGroup &group,
   const QString folderPath = m_db->folderForGroup(groupId);
 
   if (plan.toUpload.isEmpty() && plan.toDownload.isEmpty()) {
-    QMessageBox::information(
-        this, QStringLiteral("Nothing To Sync"),
-        QStringLiteral("'%1' is up to date. Every file the group stores is in "
-                       "this folder, and every file in this folder is stored.")
-            .arg(group.name));
+    // Not worth a modal: the user asked a question and the answer is "nothing".
+    // Interrupting them to say so would be the only interruption in the whole
+    // flow, and it would be the one carrying the least news.
+    showActivity(QStringLiteral("✓ '%1' is already up to date").arg(group.name),
+                 6000);
+    finishSync(groupId);
     refreshAllSyncCounts(true);
     return;
   }
 
   const QList<ApiFile> toDownload = plan.toDownload;
+  // One bar for both halves, so the count does not restart halfway through.
+  const int totalFiles = plan.toUpload.size() + toDownload.size();
+  if (!beginTransfer(groupId, group.name,
+                     plan.toUpload.isEmpty() ? QStringLiteral("Downloading")
+                                             : QStringLiteral("Uploading"),
+                     totalFiles)) {
+    finishSync(groupId);
+    return;
+  }
+
+  const int uploadCount = plan.toUpload.size();
 
   // Uploads before downloads: a member who is both ahead and behind should
   // hand over what only they have before spending time pulling.
-  const auto startDownloads = [this, groupId, group, folderPath,
-                               toDownload](int uploaded, int uploadSkipped,
-                                           bool canceled) {
-    const auto report = [this, group, uploaded, uploadSkipped](
+  const auto startDownloads = [this, groupId, group, folderPath, toDownload,
+                               uploadCount](int uploaded, int uploadSkipped,
+                                            bool canceled) {
+    const auto report = [this, groupId, group, uploaded, uploadSkipped](
                             int downloaded, int downloadSkipped, bool stopped) {
-      QStringList lines;
-      lines << QStringLiteral("'%1' synced.").arg(group.name);
-      lines << QStringLiteral("↑ %1 uploaded").arg(uploaded);
-      lines << QStringLiteral("↓ %1 downloaded").arg(downloaded);
-      if (uploadSkipped > 0) {
-        lines << QStringLiteral("%1 file(s) were already stored.")
-                     .arg(uploadSkipped);
-      }
-      if (downloadSkipped > 0) {
-        lines << QStringLiteral(
-                     "%1 file(s) could not be fetched: they are registered in "
-                     "the group but nobody has uploaded their contents yet.")
-                     .arg(downloadSkipped);
-      }
-      if (stopped)
-        lines << QStringLiteral("Sync was stopped before it finished.");
+      endTransfer();
+      finishSync(groupId);
 
-      QMessageBox::information(this,
-                               stopped ? QStringLiteral("Sync Stopped")
-                                       : QStringLiteral("Sync Complete"),
-                               lines.join(QStringLiteral("\n")));
+      QStringList parts;
+      if (uploaded > 0)
+        parts << QStringLiteral("↑%1 uploaded").arg(uploaded);
+      if (downloaded > 0)
+        parts << QStringLiteral("↓%1 downloaded").arg(downloaded);
+      if (uploadSkipped > 0)
+        parts << QStringLiteral("%1 already stored").arg(uploadSkipped);
+      if (downloadSkipped > 0)
+        parts << QStringLiteral("%1 not uploaded by anyone yet")
+                     .arg(downloadSkipped);
+      if (parts.isEmpty())
+        parts << QStringLiteral("nothing to move");
+
+      showActivity(QStringLiteral("%1 '%2' — %3")
+                       .arg(stopped ? QStringLiteral("⏹ Stopped syncing")
+                                    : QStringLiteral("✓ Synced"),
+                            group.name, parts.join(QStringLiteral(", "))),
+                   stopped ? 10000 : 8000);
 
       // Downloaded PDFs are only files on disk until a scan turns them into
       // rows, which is also what re-registers them locally.
@@ -2652,20 +3062,17 @@ void MainWindow::runSync(int groupId, const ApiGroup &group,
       return;
     }
 
-    auto *progress = new QProgressDialog(
-        QStringLiteral("Downloading files from '%1'…").arg(group.name),
-        QStringLiteral("Cancel"), 0, toDownload.size(), this);
-    progress->setWindowModality(Qt::WindowModal);
-    progress->setMinimumDuration(0);
-    progress->setValue(0);
+    // The download half counts its own files from zero; the bar carries on from
+    // where the uploads left it.
+    m_transfer.base = uploadCount;
+    stepTransfer(QStringLiteral("Downloading"), QString{}, 0);
 
     // Names already in the folder are off limits, so a re-download never
     // overwrites a file that is sitting there under the same name.
     const QStringList taken =
         QDir(folderPath)
             .entryList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
-    downloadNext(groupId, folderPath, toDownload, taken, 0, 0, progress,
-                 report);
+    downloadNext(groupId, folderPath, toDownload, taken, 0, 0, report);
   };
 
   if (plan.toUpload.isEmpty()) {
@@ -2673,14 +3080,7 @@ void MainWindow::runSync(int groupId, const ApiGroup &group,
     return;
   }
 
-  auto *progress = new QProgressDialog(
-      QStringLiteral("Uploading files in '%1'…").arg(group.name),
-      QStringLiteral("Cancel"), 0, plan.toUpload.size(), this);
-  progress->setWindowModality(Qt::WindowModal);
-  progress->setMinimumDuration(0);
-  progress->setValue(0);
-
-  uploadNext(groupId, plan.toUpload, 0, 0, progress, startDownloads);
+  uploadNext(groupId, plan.toUpload, 0, 0, startDownloads);
 }
 
 void MainWindow::syncPendingData(int groupId, std::function<void()> onDone) {
@@ -2695,11 +3095,34 @@ void MainWindow::syncPendingData(int groupId, std::function<void()> onDone) {
     }
   }
 
-  syncNextPendingFile(groupId, pendingFiles, [this, groupId, onDone]() {
-    const QList<int> pendingTags = m_db->getFilesWithPendingTags();
-    syncNextPendingTag(groupId, pendingTags, [this, groupId, onDone]() {
-      const QList<int> pendingNotes = m_db->getFilesWithPendingNotes();
-      syncNextPendingNote(groupId, pendingNotes, onDone);
+  // Only this folder's files. A tag written on a PDF in some other watched
+  // directory belongs to *that* directory's group, and sending it here would
+  // register the file in the wrong one — a file's group is decided by where it
+  // sits, and nothing else is allowed to decide it either.
+  const QSet<int> mine = filesWithPendingMetadata(folderPath);
+  // By value: this outlives the call, riding through the callback chain below.
+  const auto onlyMine = [mine](const QList<int> &ids) {
+    QList<int> kept;
+    for (const int id : ids) {
+      if (mine.contains(id))
+        kept << id;
+    }
+    return kept;
+  };
+
+  // Registrations first, then the edits waiting on them: this is the moment a
+  // tag written on a file nobody had shared yet finally has somewhere to go.
+  syncNextPendingFile(groupId, pendingFiles, [this, groupId, folderPath,
+                                              onlyMine, onDone]() {
+    const QList<int> pendingTags = onlyMine(m_db->getFilesWithPendingTags());
+    syncNextPendingTag(groupId, pendingTags, [this, groupId, folderPath,
+                                              onlyMine, onDone]() {
+      const QList<int> pendingNotes = onlyMine(m_db->getFilesWithPendingNotes());
+      syncNextPendingNote(groupId, pendingNotes,
+                          [this, folderPath, onDone]() {
+                            refreshPendingMetaMarks(folderPath);
+                            onDone();
+                          });
     });
   });
 }
@@ -2815,21 +3238,17 @@ void MainWindow::syncNotesForFile(int groupId, int remoteFileId,
 }
 
 void MainWindow::uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
-                            int skipped, QProgressDialog *progress,
+                            int skipped,
                             std::function<void(int, int, bool)> onDone) {
   const int done = uploaded + skipped;
 
-  if (pending.isEmpty() || progress->wasCanceled()) {
-    const bool canceled = progress->wasCanceled() && !pending.isEmpty();
-    progress->close();
-    progress->deleteLater();
+  if (pending.isEmpty() || transferCanceled()) {
+    const bool canceled = transferCanceled() && !pending.isEmpty();
     onDone(uploaded, skipped, canceled);
     return;
   }
 
   const ApiFile file = pending.takeFirst();
-  progress->setValue(done);
-  progress->setLabelText(QStringLiteral("Uploading %1…").arg(file.fileName));
 
   // The backend knows the file by content hash; we have to find the copy on
   // this machine to send.
@@ -2843,20 +3262,29 @@ void MainWindow::uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
 
   if (localPath.isEmpty()) {
     // Another member registered it; we simply do not hold a copy to upload.
-    uploadNext(groupId, pending, uploaded, skipped + 1, progress, onDone);
+    uploadNext(groupId, pending, uploaded, skipped + 1, onDone);
     return;
   }
 
+  stepTransfer(QStringLiteral("Uploading"), file.fileName, done);
+  // The row for this file says what is happening to it, so the answer is in
+  // the same place the user is already looking.
+  markFileSyncState(localPath, PdfModel::SyncTransferring,
+                    QStringLiteral("Uploading…"));
+
   m_api->uploadFile(
       groupId, file.id, localPath,
-      [this, groupId, pending, uploaded, skipped, progress,
+      [this, groupId, pending, uploaded, skipped, localPath,
        onDone](const ApiUploadResult &result) {
+        markFileSyncState(localPath, PdfModel::SyncSynced,
+                          QStringLiteral("Stored for the group."));
         uploadNext(groupId, pending, uploaded + (result.uploaded ? 1 : 0),
-                   skipped + (result.uploaded ? 0 : 1), progress, onDone);
+                   skipped + (result.uploaded ? 0 : 1), onDone);
       },
-      [this, progress, uploaded, skipped, onDone](const ApiError &error) {
-        progress->close();
-        progress->deleteLater();
+      [this, uploaded, skipped, localPath, onDone](const ApiError &error) {
+        markFileSyncState(localPath, PdfModel::SyncLocalOnly,
+                          QStringLiteral("Upload failed — still only on this "
+                                         "machine."));
         showError(error);
         // Reported as a stop rather than a completion: the rest never went up,
         // and the download half should not run on the back of a failure.
@@ -3077,9 +3505,30 @@ void MainWindow::refreshDetailPane() {
         "Sign in (File ▸ Sign In) to use groups, shared tags and notes."));
     m_detailMeta->setToolTip(QString{});
   } else if (hasFile) {
-    m_detailMeta->setText(QStringLiteral("%1\n%2").arg(
-        breakableText(file.filePath),
-        breakableText(file.tags.join(QStringLiteral(", ")))));
+    // The dot on the row says which state this file is in; the pane is where
+    // there is room to say what that means and what would change it.
+    QString state;
+    switch (m_pdfModel->syncState(file.filePath)) {
+    case PdfModel::SyncSynced:
+      state = QStringLiteral("● Shared with the group");
+      break;
+    case PdfModel::SyncTransferring:
+      state = QStringLiteral("● Transferring now…");
+      break;
+    case PdfModel::SyncLocalOnly:
+      state = QStringLiteral("● Only on this machine — sync to share it");
+      break;
+    case PdfModel::SyncUnknown:
+      break;
+    }
+
+    QStringList lines{breakableText(file.filePath)};
+    if (!file.tags.isEmpty())
+      lines << breakableText(file.tags.join(QStringLiteral(", ")));
+    if (!state.isEmpty())
+      lines << state;
+
+    m_detailMeta->setText(lines.join(QLatin1Char('\n')));
     m_detailMeta->setToolTip(file.filePath);
   } else {
     m_detailMeta->setToolTip(QString{});
@@ -3135,13 +3584,23 @@ void MainWindow::refreshDetailPane() {
 
   refreshMembers();
 
+  // Writing a note never needs a sync and never waits for one. On a file the
+  // group has not been told about it is kept here and goes up behind the file,
+  // so the field says that rather than refusing.
   const bool canWriteNotes = online && hasFile && activeGroupId() >= 0;
+  const bool shared =
+      canWriteNotes && knownRemoteFileId(activeGroupId(), m_selectedFilePath) >= 0;
   m_noteEdit->setEnabled(canWriteNotes);
   m_addNoteBtn->setEnabled(canWriteNotes);
-  m_noteEdit->setPlaceholderText(
-      canWriteNotes ? QStringLiteral("Add a note visible to '%1'…")
-                          .arg(activeGroup().name)
-                    : QStringLiteral("Add a note…"));
+  if (!canWriteNotes) {
+    m_noteEdit->setPlaceholderText(QStringLiteral("Add a note…"));
+  } else if (shared) {
+    m_noteEdit->setPlaceholderText(
+        QStringLiteral("Add a note visible to '%1'…").arg(activeGroup().name));
+  } else {
+    m_noteEdit->setPlaceholderText(
+        QStringLiteral("Add a note — kept here until this file is shared…"));
+  }
 
   refreshNotes();
 }
@@ -3516,6 +3975,30 @@ void MainWindow::applyDarkTheme(bool enabled) {
             font-size: 8pt;
         }
         QPushButton#syncBanner:hover { background: #35507a; color: #cfe0ff; }
+        QPushButton#syncBanner:disabled {
+            background: #24262b;
+            border-color: #3a3d42;
+            color: #6a6d75;
+        }
+
+        /* ── Files moving in the background ── */
+        QLabel#transferLabel { color: #4d8eff; font-size: 8pt; }
+        QProgressBar#transferBar {
+            background: #2d3035;
+            border: 1px solid #3a3d42;
+            border-radius: 6px;
+        }
+        QProgressBar#transferBar::chunk {
+            background: #4d8eff;
+            border-radius: 5px;
+        }
+        QPushButton#transferStop {
+            padding: 0 8px;
+            font-size: 8pt;
+            color: #c0392b;
+        }
+        QPushButton#transferStop:hover { color: #e8503a; }
+        QPushButton#transferStop:disabled { color: #6a6d75; }
     )"));
 }
 

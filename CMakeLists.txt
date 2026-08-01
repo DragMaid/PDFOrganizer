@@ -78,6 +78,7 @@ set(HEADERS
     src/views/joingroupdialog.h
     src/delegates/listdelegate.h
     src/delegates/griddelegate.h
+    src/delegates/syncbadge.h
     src/utils/pdfopener.h
     src/utils/thumbnailgenerator.h
     src/utils/searchfilterproxy.h

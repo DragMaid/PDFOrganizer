@@ -1,5 +1,6 @@
 #include "listdelegate.h"
 #include "models/pdfmodel.h"
+#include "delegates/syncbadge.h"
 #include <QPainter>
 #include <QPainterPath>
 #include <QFontMetrics>
@@ -40,6 +41,9 @@ void ListDelegate::paint(QPainter* painter,
     const QDateTime   opened   = index.data(PdfModel::LastOpenedRole).toDateTime();
     const QPixmap     thumb    = qvariant_cast<QPixmap>(index.data(PdfModel::ThumbnailRole));
     const bool        removing = index.data(PdfModel::PendingRemovalRole).toBool();
+    const auto        syncState = static_cast<PdfModel::SyncState>(
+                                      index.data(PdfModel::SyncStateRole).toInt());
+    const bool        pendingMeta = index.data(PdfModel::PendingMetaRole).toBool();
 
     // A removal is a round trip that can fail, so the row is faded rather than
     // taken away — the user sees it is on its way out and can carry on.
@@ -63,6 +67,7 @@ void ListDelegate::paint(QPainter* painter,
                          rect.top() + (rect.height() - kIconSize) / 2,
                          kIconSize, kIconSize);
     drawIcon(painter, iconRect, thumb);
+    SyncBadge::paint(painter, iconRect, syncState, pendingMeta);
 
     // ── Text area ─────────────────────────────────────────────────────────────
     const int textLeft = iconRect.right() + kPadding;

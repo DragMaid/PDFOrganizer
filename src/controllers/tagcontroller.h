@@ -50,7 +50,12 @@ public:
 
     /// Replace the local vocabulary with the tags the server reports across
     /// every group the user belongs to.
-    void applyRemoteVocabulary(const QStringList& names);
+    ///
+    /// Returns the tags that disappeared. A caller needs them because a tag
+    /// going away is not a quiet event: anything filtering on it is now
+    /// filtering on nothing, and every file that carried it is drawn wrong
+    /// until it is redrawn.
+    QStringList applyRemoteVocabulary(const QStringList& names);
 
     /// Record the tag list the server confirmed for a file. Used instead of
     /// setFileTags() once signed in, so the local copy always reflects what
@@ -62,6 +67,11 @@ signals:
     void tagDeleted(const QString& name);
     void tagRenamed(const QString& oldName, const QString& newName);
     void fileTagsChanged(const QString& filePath, const QStringList& tags);
+
+    /// One or more tags left the vocabulary — deleted here, or by a teammate and
+    /// heard about over the WebSocket. Emitted from applyRemoteVocabulary() so
+    /// both routes arrive at the same place.
+    void vocabularyShrank(const QStringList& removed);
 
 private:
     TagModel*        m_tagModel;

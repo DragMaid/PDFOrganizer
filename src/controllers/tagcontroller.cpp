@@ -117,17 +117,55 @@ bool TagController::removeTagFromFile(const QString& filePath, const QString& ta
 
 // ── Mirroring the backend ─────────────────────────────────────────────────────
 
-void TagController::applyRemoteVocabulary(const QStringList& names)
+QStringList TagController::applyRemoteVocabulary(const QStringList& names)
 {
+    // A tag sitting on a file whose edit has not gone up yet is not one the
+    // server forgot — it is one the server has never been told about. Deleting
+    // it here would cascade the assignment away, and the edit the user is still
+    // waiting to send would go up as a removal they never made.
+    QStringList unsent;
+    for (const int fileId : m_db->getFilesWithPendingTags()) {
+        for (const QString& tag : m_db->getFileTags(fileId)) {
+            if (!unsent.contains(tag, Qt::CaseInsensitive))
+                unsent << tag;
+        }
+    }
+
     // Rebuild the local table so tags deleted by a teammate disappear here too.
+    QStringList removed;
     for (const QString& existing : m_db->loadTags()) {
-        if (!names.contains(existing, Qt::CaseInsensitive))
-            m_db->deleteTag(existing);
+        if (names.contains(existing, Qt::CaseInsensitive))
+            continue;
+        if (unsent.contains(existing, Qt::CaseInsensitive))
+            continue;
+        m_db->deleteTag(existing);
+        removed << existing;
     }
     for (const QString& name : names)
         m_db->saveTag(name);
 
     m_tagModel->resetTags(m_db->loadTags());
+
+    if (removed.isEmpty())
+        return removed;
+
+    // Deleting the tags row cascades pdf_tags, but the PdfFile values the views
+    // draw from live in memory and would happily keep showing a tag that no
+    // longer exists in the database, on the server, or in the sidebar.
+    for (PdfFile f : m_pdfModel->allFiles()) {
+        QStringList kept;
+        for (const QString& tag : f.tags) {
+            if (!removed.contains(tag, Qt::CaseInsensitive))
+                kept << tag;
+        }
+        if (kept.size() == f.tags.size())
+            continue;
+        f.tags = kept;
+        m_pdfModel->updateFile(f);
+    }
+
+    emit vocabularyShrank(removed);
+    return removed;
 }
 
 void TagController::applyRemoteFileTags(const QString& filePath,
