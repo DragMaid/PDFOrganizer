@@ -1,5 +1,6 @@
 #pragma once
 #include <QAbstractTableModel>
+#include <QHash>
 #include <QList>
 #include <QSet>
 #include "pdffile.h"
@@ -36,7 +37,26 @@ public:
         /// is and stays clickable; it is only drawn as on its way out, because
         /// the request can still fail and the user should not be made to wait
         /// for it either way.
-        PendingRemovalRole
+        PendingRemovalRole,
+        /// SyncState — whether the group this file's folder belongs to holds a
+        /// copy of it. This is the *file's* answer, not the folder's: a folder
+        /// badge says how much work a sync would do, and this says which
+        /// individual PDFs that work is about.
+        SyncStateRole,
+        /// QString — the sentence behind SyncStateRole, shown on hover.
+        SyncDetailRole,
+        /// bool — tags or notes written here that the server has not taken yet.
+        /// Deliberately separate from SyncStateRole: metadata never blocks and
+        /// never asks to be synced, it just rides along with the next one.
+        PendingMetaRole
+    };
+
+    /// How far this machine's copy of a PDF and the group's copy agree.
+    enum SyncState {
+        SyncUnknown = 0,    ///< Signed out, or the folder has no group — say nothing.
+        SyncLocalOnly,      ///< Held here; the group has no copy stored.
+        SyncTransferring,   ///< Being uploaded or downloaded right now.
+        SyncSynced          ///< The group stores this exact content.
     };
 
     // ── Columns for table / list view ─────────────────────────────────────────
@@ -81,6 +101,21 @@ public:
     void setPendingRemoval(const QString& filePath, bool pending);
     [[nodiscard]] bool isPendingRemoval(const QString& filePath) const;
 
+    /// Record whether the group holds this file, and the sentence explaining it.
+    /// MainWindow owns the answer — it is the only thing that can match what is
+    /// on disk against what the server reports — and this model only draws it.
+    void setSyncState(const QString& filePath, SyncState state,
+                      const QString& detail = {});
+    [[nodiscard]] SyncState syncState(const QString& filePath) const;
+
+    /// Tag or note edits sitting on this machine, waiting for the file itself to
+    /// reach the group.
+    void setPendingMeta(const QString& filePath, bool pending);
+
+    /// Forget every file's sync state. Signed out there is no group for any of
+    /// them to be in sync with, so a stale green dot would be a lie.
+    void clearSyncStates();
+
     // ── Query ─────────────────────────────────────────────────────────────────
     [[nodiscard]] PdfFile  fileAt(int row)                        const;
     [[nodiscard]] PdfFile  fileByPath(const QString& path)        const;
@@ -92,6 +127,15 @@ signals:
     void fileUpdated(const QString& filePath);
 
 private:
-    QList<PdfFile> m_files;
-    QSet<QString>  m_pendingRemoval;
+    /// Keyed by path rather than stored on PdfFile, so a rescan replacing the
+    /// whole file list does not throw the answers away with it.
+    struct SyncMark {
+        SyncState state = SyncUnknown;
+        QString   detail;
+    };
+
+    QList<PdfFile>            m_files;
+    QSet<QString>             m_pendingRemoval;
+    QHash<QString, SyncMark>  m_syncMarks;
+    QSet<QString>             m_pendingMeta;
 };

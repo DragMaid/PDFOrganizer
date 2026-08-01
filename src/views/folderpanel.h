@@ -30,6 +30,14 @@ public:
 
     void refresh();   ///< Re-draw tag chips from TagModel
 
+    /// Drop every tag filter and say so, so callers do not have to reach into
+    /// the chips. Used when a tag is deleted: a filter pinned to a tag that no
+    /// longer exists matches nothing, and an empty file list with no visible
+    /// cause is indistinguishable from having lost the files.
+    void clearTagFilter();
+
+    [[nodiscard]] QStringList activeTags() const { return m_activeTags; }
+
 signals:
     void folderSelected          (const QString& folderPath);  ///< "" = All
     void tagsSelected            (const QStringList& tags);
