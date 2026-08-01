@@ -17,4 +17,5 @@ dependencies = [
     "sqlalchemy>=2.0.51",
     "uvicorn>=0.51.0",
     "websockets>=17.0",
+    "psycopg2>=2.9.12",
 ]
