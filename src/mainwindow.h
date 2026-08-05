@@ -233,6 +233,11 @@ private:
 
     // ── Session ───────────────────────────────────────────────────────────────
     void restoreSessionOrPrompt();
+    /// One attempt to spend the stored refresh token, called by
+    /// restoreSessionOrPrompt() and then by itself on a retryable failure.
+    /// Split out so a retry does not re-read settings or re-touch ApiClient's
+    /// base URL each time.
+    void attemptSessionRestore();
     void onSignedIn();
     void saveSession();
     void clearSavedSession();
@@ -283,9 +288,10 @@ private:
     ///
     /// The server cannot answer this alone: it knows which files it stores, and
     /// only this machine knows which of them are actually on disk here. So the
-    /// two halves are matched by content hash — the same identity the backend
-    /// keys files by — and a file this machine no longer holds is a download,
-    /// exactly like a file nobody has uploaded yet is an upload.
+    /// two halves are matched by uuid — the identity a local path is tracked
+    /// by, kept stable across a content change — and a file this machine no
+    /// longer holds is a download, exactly like a file nobody has uploaded yet
+    /// is an upload.
     ///
     /// Only *files* appear here. Tags and notes are deliberately absent: they
     /// are sent the moment they are written and, when that is impossible, they
@@ -304,8 +310,8 @@ private:
         [[nodiscard]] int downloads() const { return toDownload.size(); }
     };
 
-    /// Match @p status against what is on disk for @p groupId. Not const: it
-    /// hashes local files, and hashing caches.
+    /// Match @p status against what is on disk for @p groupId. Not const: a
+    /// path seen for the first time is assigned a uuid on the spot.
     [[nodiscard]] SyncPlan planSync(int groupId, const ApiSyncStatus& status);
 
     /// What one group's counts came out as, kept per group rather than only for
@@ -390,11 +396,21 @@ private:
     void refreshRemoteFileTags(int groupId, int remoteFileId);
 
     /// SHA-256 for a local file, cached in SQLite so a file is hashed once.
+    /// Still needed to tell the backend what a file's *bytes* are — uploads and
+    /// registration both carry it — but no longer how its identity is tracked.
     QString contentHashFor(const QString& filePath);
 
-    /// Resolve a local path to its backend file id inside @p groupId,
-    /// registering it if this is the first time. On failure @p onFailed runs
-    /// instead; omit it and the failure is shown to the user as a modal.
+    /// The uuid @p filePath is tracked by, assigning one on the spot if this is
+    /// the first time the path has been seen. This is the identity that
+    /// survives the file's content changing; contentHashFor() does not.
+    QString fileUuidFor(const QString& filePath);
+
+    /// Resolve a local path to its backend listing id inside @p groupId,
+    /// registering it if this is the first time — or re-registering it if its
+    /// content has changed since the last time this ran, so an annotated PDF
+    /// repoints its existing listing instead of silently going stale. On
+    /// failure @p onFailed runs instead; omit it and the failure is shown to
+    /// the user as a modal.
     void resolveRemoteFile(int groupId, const QString& filePath,
                            std::function<void(int)> onReady,
                            std::function<void(const ApiError&)> onFailed = {});
@@ -552,6 +568,11 @@ private:
     /// scan cannot create a second group under the same name.
     QSet<QString>    m_foldersCreatingGroup;
     bool             m_signingIn = false;
+    /// How many times restoreSessionOrPrompt() has retried a refresh that
+    /// failed for a reason other than the token itself being rejected — a
+    /// server that has not finished waking up from a cold boot, say. Reset to
+    /// 0 at the start of every restore attempt.
+    int              m_sessionRestoreAttempts = 0;
 
     // ── Sync state ────────────────────────────────────────────────────────────
     /// Group id → how far that group is out of sync. Every group with a local

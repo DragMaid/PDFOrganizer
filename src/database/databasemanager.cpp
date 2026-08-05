@@ -126,14 +126,17 @@ bool DatabaseManager::createSchema()
             )
         )"),
 
-        // Maps a content hash to the id the backend assigned it in a group, so
-        // routine operations skip a registration round trip.
+        // A local path's identity: the uuid it was first assigned, and — once
+        // registered — which group and backend listing it maps to and the
+        // content hash that was current at the time. group_id/remote_file_id
+        // are -1 and registered_hash is empty until the first registration.
         QStringLiteral(R"(
-            CREATE TABLE IF NOT EXISTS remote_files (
-                group_id       INTEGER NOT NULL,
-                content_hash   TEXT    NOT NULL,
-                remote_file_id INTEGER NOT NULL,
-                PRIMARY KEY (group_id, content_hash)
+            CREATE TABLE IF NOT EXISTS file_identity (
+                path            TEXT PRIMARY KEY,
+                uuid            TEXT NOT NULL UNIQUE,
+                group_id        INTEGER NOT NULL DEFAULT -1,
+                remote_file_id  INTEGER NOT NULL DEFAULT -1,
+                registered_hash TEXT
             )
         )"),
 
@@ -157,6 +160,7 @@ bool DatabaseManager::createSchema()
         // Performance indexes
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_folder ON pdf_files(folder_path)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_opened ON pdf_files(last_opened)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_identity_remote ON file_identity(group_id, remote_file_id)"),
     };
 
     for (const QString& stmt : ddl) {
@@ -204,6 +208,9 @@ bool DatabaseManager::createSchema()
         QStringLiteral("DROP TABLE IF EXISTS file_group_members"),
         QStringLiteral("DROP TABLE IF EXISTS file_groups"),
         QStringLiteral("DELETE FROM settings WHERE key = 'githubUser'"),
+        // Superseded by file_identity: sync identity moved from content hash
+        // to a uuid per local path, which survives a file being annotated.
+        QStringLiteral("DROP TABLE IF EXISTS remote_files"),
     };
     for (const QString& stmt : retired) {
         if (!q.exec(stmt))
@@ -349,7 +356,12 @@ bool DatabaseManager::deleteFile(const QString& filePath)
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral("UPDATE pdf_files SET deleted_locally = 1 WHERE path = :p"));
     q.bindValue(QStringLiteral(":p"), filePath);
-    return q.exec();
+    const bool ok = q.exec();
+
+    // The path is gone for good, not merely missing from one scan, so its
+    // identity should not linger to be handed to some unrelated later file.
+    forgetFileIdentity(filePath);
+    return ok;
 }
 
 bool DatabaseManager::updateLastOpened(const QString& filePath, const QDateTime& dt)
@@ -482,54 +494,153 @@ bool DatabaseManager::storeHash(const QString& path, const QString& contentHash,
     return q.exec();
 }
 
-// ── Remote id cache ───────────────────────────────────────────────────────────
+// ── File identity ───────────────────────────────────────────────────────────
 
-int DatabaseManager::remoteFileId(int groupId, const QString& contentHash) const
+QString DatabaseManager::fileUuid(const QString& path) const
 {
-    if (contentHash.isEmpty()) return -1;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT uuid FROM file_identity WHERE path = :p"));
+    q.bindValue(QStringLiteral(":p"), path);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return {};
+}
+
+QString DatabaseManager::ensureFileUuid(const QString& path)
+{
+    const QString existing = fileUuid(path);
+    if (!existing.isEmpty())
+        return existing;
+
+    const QString fresh = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "INSERT INTO file_identity (path, uuid) VALUES (:p, :u)"));
+    q.bindValue(QStringLiteral(":p"), path);
+    q.bindValue(QStringLiteral(":u"), fresh);
+    if (!q.exec()) {
+        qWarning() << "ensureFileUuid failed:" << q.lastError().text();
+        return {};
+    }
+    return fresh;
+}
+
+bool DatabaseManager::adoptFileUuid(const QString& path, const QString& uuid)
+{
+    if (uuid.isEmpty()) return false;
 
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(R"(
-        SELECT remote_file_id FROM remote_files
-        WHERE group_id = :g AND content_hash = :h
+        INSERT INTO file_identity (path, uuid) VALUES (:p, :u)
+        ON CONFLICT(path) DO UPDATE SET uuid = excluded.uuid
     )"));
+    q.bindValue(QStringLiteral(":p"), path);
+    q.bindValue(QStringLiteral(":u"), uuid);
+    return q.exec();
+}
+
+QString DatabaseManager::pathForUuid(const QString& uuid) const
+{
+    if (uuid.isEmpty()) return {};
+
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("SELECT path FROM file_identity WHERE uuid = :u"));
+    q.bindValue(QStringLiteral(":u"), uuid);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return {};
+}
+
+bool DatabaseManager::forgetFileIdentity(const QString& path)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM file_identity WHERE path = :p"));
+    q.bindValue(QStringLiteral(":p"), path);
+    return q.exec();
+}
+
+int DatabaseManager::remoteFileId(int groupId, const QString& uuid) const
+{
+    if (uuid.isEmpty()) return -1;
+
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        SELECT remote_file_id FROM file_identity
+        WHERE uuid = :u AND group_id = :g AND remote_file_id >= 0
+    )"));
+    q.bindValue(QStringLiteral(":u"), uuid);
     q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":h"), contentHash);
     if (q.exec() && q.next())
         return q.value(0).toInt();
     return -1;
 }
 
-bool DatabaseManager::storeRemoteFileId(int groupId, const QString& contentHash,
-                                        int remoteFileId)
+bool DatabaseManager::storeRemoteFileId(int groupId, const QString& uuid,
+                                        int remoteFileId, const QString& contentHash)
 {
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(R"(
-        INSERT INTO remote_files (group_id, content_hash, remote_file_id)
-        VALUES (:g, :h, :r)
-        ON CONFLICT(group_id, content_hash) DO UPDATE SET
-            remote_file_id = excluded.remote_file_id
+        UPDATE file_identity
+        SET group_id = :g, remote_file_id = :r, registered_hash = :h
+        WHERE uuid = :u
     )"));
     q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":h"), contentHash);
     q.bindValue(QStringLiteral(":r"), remoteFileId);
+    q.bindValue(QStringLiteral(":h"), contentHash);
+    q.bindValue(QStringLiteral(":u"), uuid);
     return q.exec();
 }
 
-bool DatabaseManager::forgetRemoteFile(int groupId, const QString& contentHash)
+QString DatabaseManager::registeredHash(const QString& uuid) const
 {
+    if (uuid.isEmpty()) return {};
+
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral(
-        "DELETE FROM remote_files WHERE group_id = :g AND content_hash = :h"));
+        "SELECT registered_hash FROM file_identity WHERE uuid = :u"));
+    q.bindValue(QStringLiteral(":u"), uuid);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return {};
+}
+
+QString DatabaseManager::pathForRemoteFile(int groupId, int remoteFileId) const
+{
+    if (remoteFileId < 0) return {};
+
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        SELECT path FROM file_identity
+        WHERE group_id = :g AND remote_file_id = :r
+    )"));
     q.bindValue(QStringLiteral(":g"), groupId);
-    q.bindValue(QStringLiteral(":h"), contentHash);
+    q.bindValue(QStringLiteral(":r"), remoteFileId);
+    if (q.exec() && q.next())
+        return q.value(0).toString();
+    return {};
+}
+
+bool DatabaseManager::forgetRemoteFile(int groupId, const QString& uuid)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(R"(
+        UPDATE file_identity
+        SET group_id = -1, remote_file_id = -1, registered_hash = NULL
+        WHERE uuid = :u AND group_id = :g
+    )"));
+    q.bindValue(QStringLiteral(":u"), uuid);
+    q.bindValue(QStringLiteral(":g"), groupId);
     return q.exec();
 }
 
 bool DatabaseManager::clearRemoteCache()
 {
+    // The registrations go, the uuids stay: a uuid is a purely local identity
+    // for a path, unrelated to which server or account it was last synced
+    // against — there is no reason for a sign-out to forget it.
     QSqlQuery q(m_db);
-    const bool files = q.exec(QStringLiteral("DELETE FROM remote_files"));
+    const bool files = q.exec(QStringLiteral(
+        "UPDATE file_identity SET group_id = -1, remote_file_id = -1, registered_hash = NULL"));
 
     // The ids go, the names stay. A different server (or account) numbers its
     // groups differently, so every id here is now meaningless — but the name is

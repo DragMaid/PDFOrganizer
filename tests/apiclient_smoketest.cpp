@@ -207,10 +207,12 @@ int main(int argc, char** argv)
     check(hash.size() == 64, "hashFile returns a 64-char digest");
 
     int fileId = -1;
+    const QString aliceUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     await("alice registers the file", [&](auto done) {
-        alice.registerFile(groupId, hash, QStringLiteral("paper.pdf"), 42, 3,
+        alice.registerFile(groupId, aliceUuid, hash, QStringLiteral("paper.pdf"), 42, 3,
                            [&, done](const ApiFile& file) {
                                check(file.isValid(), "file has an id");
+                               check(file.uuid == aliceUuid, "uuid round-trips");
                                check(file.contentHash == hash, "hash round-trips");
                                check(!file.uploaded, "not uploaded yet");
                                fileId = file.id;
@@ -218,8 +220,9 @@ int main(int argc, char** argv)
                            });
     });
 
+    const QString bobUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
     await("bob registering the same content is a no-op", [&](auto done) {
-        bob.registerFile(groupId, hash, QStringLiteral("copy.pdf"), 42, 3,
+        bob.registerFile(groupId, bobUuid, hash, QStringLiteral("copy.pdf"), 42, 3,
                          [&, done](const ApiFile& file) {
                              check(file.id == fileId,
                                    "same content resolves to the same record");
@@ -515,7 +518,8 @@ int main(int argc, char** argv)
     // group finds it already stored — nothing to upload before downloading.
     int sharedFileId = -1;
     await("the same content in a new group reuses the stored blob", [&](auto done) {
-        alice.registerFile(sharedId, hash, QStringLiteral("paper.pdf"), 42, 3,
+        alice.registerFile(sharedId, QUuid::createUuid().toString(QUuid::WithoutBraces),
+                           hash, QStringLiteral("paper.pdf"), 42, 3,
                            [&, done](const ApiFile& file) {
                                check(file.isValid(), "file registered");
                                check(file.uploaded == blobStored,
@@ -563,7 +567,8 @@ int main(int argc, char** argv)
                                             QCryptographicHash::Sha256)
                                             .toHex();
               alice.registerFile(
-                  sharedId, QString::fromLatin1(otherHash.toLatin1()),
+                  sharedId, QUuid::createUuid().toString(QUuid::WithoutBraces),
+                  QString::fromLatin1(otherHash.toLatin1()),
                   QStringLiteral("missing.pdf"), 9, 1,
                   [&, done](const ApiFile& file) {
                       carol.downloadFile(

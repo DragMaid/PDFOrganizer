@@ -108,6 +108,11 @@ struct ApiMember
 struct ApiFile
 {
     int         id = -1;
+    /// The client-assigned identity this listing is anchored to. Stable across
+    /// a re-registration that changes contentHash (the file was annotated),
+    /// which is what lets a client recognise "the same file, edited" instead
+    /// of treating it as new.
+    QString     uuid;
     QString     contentHash;
     QString     fileName;
     qint64      fileSizeBytes = 0;

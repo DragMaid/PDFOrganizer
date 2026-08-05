@@ -96,14 +96,29 @@ class MemberAdd(BaseModel):
 class FileRegister(BaseModel):
     """Register a locally scanned PDF into a group.
 
-    Repeating this call with the same ``content_hash`` is a no-op that returns
-    the existing record, so two members adding the same PDF never conflict.
+    ``uuid`` is the identity the client keeps for as long as it tracks this
+    file locally, independent of its content. Repeating this call with a uuid
+    already registered in the group repoints the existing listing at the new
+    ``content_hash`` — the same file, edited — instead of creating a second
+    one, which is what keeps an annotated PDF's tags and notes attached to it.
+    A uuid the group has not seen before falls back to matching by
+    ``content_hash``, so two members registering the same unmodified PDF still
+    resolve to one listing.
     """
 
+    uuid: str = Field(min_length=1, max_length=64)
     content_hash: str
     file_name: str = Field(min_length=1, max_length=500)
     file_size_bytes: int = Field(ge=0)
     page_count: int = Field(default=0, ge=0)
+
+    @field_validator("uuid")
+    @classmethod
+    def _check_uuid(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
 
     @field_validator("content_hash")
     @classmethod
@@ -116,6 +131,7 @@ class FileRegister(BaseModel):
 
 class FileOut(BaseModel):
     id: int
+    uuid: str
     content_hash: str
     file_name: str
     file_size_bytes: int

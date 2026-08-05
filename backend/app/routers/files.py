@@ -44,24 +44,27 @@ from .ws import notify
 router = APIRouter(prefix="/groups/{group_id}/files", tags=["files"])
 
 
-def _tags_for(db: Session, group_id: int, file_ids: list[int]) -> dict[int, list[str]]:
-    if not file_ids:
+def _tags_for(
+    db: Session, group_id: int, group_file_ids: list[int]
+) -> dict[int, list[str]]:
+    if not group_file_ids:
         return {}
     rows = db.execute(
-        select(FileTag.file_id, Tag.name)
+        select(FileTag.group_file_id, Tag.name)
         .join(Tag, Tag.id == FileTag.tag_id)
-        .where(FileTag.file_id.in_(file_ids), Tag.group_id == group_id)
+        .where(FileTag.group_file_id.in_(group_file_ids), Tag.group_id == group_id)
         .order_by(Tag.name)
     ).all()
     out: dict[int, list[str]] = {}
-    for file_id, name in rows:
-        out.setdefault(file_id, []).append(name)
+    for group_file_id, name in rows:
+        out.setdefault(group_file_id, []).append(name)
     return out
 
 
 def _to_out(file: File, link: GroupFile, tags: list[str]) -> FileOut:
     return FileOut(
-        id=file.id,
+        id=link.id,
+        uuid=link.client_uuid,
         content_hash=file.content_hash,
         file_name=link.display_name,
         file_size_bytes=file.file_size_bytes,
@@ -83,8 +86,32 @@ def list_files(group_id: int, user: CurrentUser, db: DbSession) -> list[FileOut]
         .where(GroupFile.group_id == group_id)
         .order_by(GroupFile.display_name)
     ).all()
-    tags = _tags_for(db, group_id, [file.id for file, _ in rows])
-    return [_to_out(file, link, tags.get(file.id, [])) for file, link in rows]
+    tags = _tags_for(db, group_id, [link.id for _, link in rows])
+    return [_to_out(file, link, tags.get(link.id, [])) for file, link in rows]
+
+
+def _resolve_file(
+    db: Session, content_hash: str, file_name: str, file_size_bytes: int, page_count: int
+) -> File:
+    # Claim the content hash. ON CONFLICT DO NOTHING plus a follow-up SELECT is
+    # race-free: whichever transaction loses simply reads the winner's row.
+    db.execute(
+        pg_insert(File)
+        .values(
+            content_hash=content_hash,
+            file_name=file_name,
+            file_size_bytes=file_size_bytes,
+            page_count=page_count,
+        )
+        .on_conflict_do_nothing(index_elements=["content_hash"])
+    )
+    file = db.execute(select(File).where(File.content_hash == content_hash)).scalar_one()
+
+    # Fill in page_count if this caller knows it and the original registrant
+    # did not. Never overwrite a known value with zero.
+    if page_count and not file.page_count:
+        file.page_count = page_count
+    return file
 
 
 @router.post("", response_model=FileOut, status_code=status.HTTP_200_OK)
@@ -97,59 +124,66 @@ def register_file(
 ) -> FileOut:
     group_or_404(db, group_id, user)
 
-    # Claim the content hash. ON CONFLICT DO NOTHING plus a follow-up SELECT is
-    # race-free: whichever transaction loses simply reads the winner's row.
-    db.execute(
-        pg_insert(File)
-        .values(
-            content_hash=payload.content_hash,
-            file_name=payload.file_name,
-            file_size_bytes=payload.file_size_bytes,
-            page_count=payload.page_count,
-        )
-        .on_conflict_do_nothing(index_elements=["content_hash"])
+    file = _resolve_file(
+        db, payload.content_hash, payload.file_name, payload.file_size_bytes,
+        payload.page_count,
     )
-    file = db.execute(
-        select(File).where(File.content_hash == payload.content_hash)
-    ).scalar_one()
 
-    # Fill in page_count if this caller knows it and the original registrant
-    # did not. Never overwrite a known value with zero.
-    if payload.page_count and not file.page_count:
-        file.page_count = payload.page_count
-
-    was_linked = (
-        db.get(GroupFile, {"group_id": group_id, "file_id": file.id}) is not None
-    )
-    db.execute(
-        pg_insert(GroupFile)
-        .values(
-            group_id=group_id,
-            file_id=file.id,
-            display_name=payload.file_name,
-            added_by=user.id,
+    link = db.execute(
+        select(GroupFile).where(
+            GroupFile.group_id == group_id, GroupFile.client_uuid == payload.uuid
         )
-        .on_conflict_do_nothing(index_elements=["group_id", "file_id"])
-    )
+    ).scalar_one_or_none()
+
+    is_new = False
+    content_changed = False
+    if link is not None:
+        # This client has registered this uuid in this group before — possibly
+        # with different bytes, e.g. the PDF was annotated since. Repoint at
+        # whatever content came with this call rather than creating a second
+        # listing, so the tags and notes attached to `link.id` stay attached.
+        content_changed = link.file_id != file.id
+        link.file_id = file.id
+        link.display_name = payload.file_name
+    else:
+        # Never seen this uuid in the group. Someone else may already hold the
+        # exact same content under a uuid of their own, in which case joining
+        # their listing is correct (two members, one PDF, one entry) —
+        # otherwise this is genuinely new.
+        link = db.execute(
+            select(GroupFile).where(
+                GroupFile.group_id == group_id, GroupFile.file_id == file.id
+            )
+        ).scalar_one_or_none()
+        if link is None:
+            is_new = True
+            link = GroupFile(
+                group_id=group_id,
+                file_id=file.id,
+                client_uuid=payload.uuid,
+                display_name=payload.file_name,
+                added_by=user.id,
+            )
+            db.add(link)
+
     db.commit()
-
-    link = db.get(GroupFile, {"group_id": group_id, "file_id": file.id})
-    assert link is not None
+    db.refresh(link)
     db.refresh(file)
 
-    # Only a file the group had never seen is news. Registration is idempotent
-    # and a rescan re-registers everything, so announcing every call would wake
-    # every member's client up for nothing several times a minute.
-    if not was_linked:
+    # Only a file the group had never seen, or one whose content just changed,
+    # is news. A plain rescan re-registers everything unchanged, and announcing
+    # every one of those would wake every member's client up for nothing
+    # several times a minute.
+    if is_new or content_changed:
         notify(
             background_tasks,
             group_id,
             "file_registered",
-            file_id=file.id,
+            file_id=link.id,
             actor_id=user.id,
         )
-    tags = _tags_for(db, group_id, [file.id])
-    return _to_out(file, link, tags.get(file.id, []))
+    tags = _tags_for(db, group_id, [link.id])
+    return _to_out(file, link, tags.get(link.id, []))
 
 
 @router.get("/{file_id}", response_model=FileOut)
@@ -158,8 +192,8 @@ def get_file(
 ) -> FileOut:
     group_or_404(db, group_id, user)
     file, link = group_file_or_404(db, group_id, file_id)
-    tags = _tags_for(db, group_id, [file.id])
-    return _to_out(file, link, tags.get(file.id, []))
+    tags = _tags_for(db, group_id, [link.id])
+    return _to_out(file, link, tags.get(link.id, []))
 
 
 @router.delete("/{file_id}", response_model=FileRemoveResult)
@@ -188,7 +222,7 @@ def remove_file(
     explicit removal in the app does.
     """
     _, member = group_or_404(db, group_id, user)
-    file, _link = group_file_or_404(db, group_id, file_id)
+    file, link = group_file_or_404(db, group_id, file_id)
 
     if purge and member.role != ROLE_OWNER:
         raise forbidden(
@@ -197,11 +231,13 @@ def remove_file(
         )
 
     # Asked before anything is detached, so a failure to reach B2 below leaves
-    # the database exactly as it was.
+    # the database exactly as it was. Any other listing — in this group or
+    # another — that still points at the same content means the blob is not
+    # ours alone to destroy.
     still_referenced = (
         db.execute(
-            select(GroupFile.file_id)
-            .where(GroupFile.file_id == file_id, GroupFile.group_id != group_id)
+            select(GroupFile.id)
+            .where(GroupFile.file_id == file.id, GroupFile.id != link.id)
             .limit(1)
         ).first()
         is not None
@@ -216,20 +252,11 @@ def remove_file(
         )
         purged = True
 
-    db.execute(delete(Note).where(Note.group_id == group_id, Note.file_id == file_id))
-    db.execute(
-        delete(FileTag).where(
-            FileTag.file_id == file_id,
-            FileTag.tag_id.in_(select(Tag.id).where(Tag.group_id == group_id)),
-        )
-    )
+    db.execute(delete(Note).where(Note.group_file_id == link.id))
+    db.execute(delete(FileTag).where(FileTag.group_file_id == link.id))
     # Core DELETE rather than db.delete(link): these run in the order written,
     # so the link is gone before the file row below takes its cascade with it.
-    db.execute(
-        delete(GroupFile).where(
-            GroupFile.group_id == group_id, GroupFile.file_id == file_id
-        )
-    )
+    db.execute(delete(GroupFile).where(GroupFile.id == link.id))
 
     if purge and not still_referenced:
         # Nothing points at the content any more, so the row would only be a
@@ -291,8 +318,8 @@ def sync_status(group_id: int, user: CurrentUser, db: DbSession) -> SyncStatusOu
         .where(GroupFile.group_id == group_id)
         .order_by(GroupFile.display_name)
     ).all()
-    tags = _tags_for(db, group_id, [file.id for file, _ in rows])
-    files = [_to_out(file, link, tags.get(file.id, [])) for file, link in rows]
+    tags = _tags_for(db, group_id, [link.id for _, link in rows])
+    files = [_to_out(file, link, tags.get(link.id, [])) for file, link in rows]
     pending = [out for out in files if not out.uploaded]
     return SyncStatusOut(
         group_id=group_id,
@@ -324,7 +351,7 @@ def upload_file(
 
     if file.b2_file_id is not None:
         return UploadResult(
-            file_id=file.id,
+            file_id=file_id,
             uploaded=False,
             already_present=True,
             b2_file_id=file.b2_file_id,
@@ -359,12 +386,12 @@ def upload_file(
         background_tasks,
         group_id,
         "file_uploaded",
-        file_id=file.id,
+        file_id=file_id,
         actor_id=user.id,
     )
 
     return UploadResult(
-        file_id=file.id,
+        file_id=file_id,
         uploaded=True,
         already_present=False,
         b2_file_id=b2_file_id,

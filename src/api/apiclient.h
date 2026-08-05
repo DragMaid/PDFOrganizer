@@ -102,12 +102,15 @@ public:
     // ── Files ─────────────────────────────────────────────────────────────────
     void listFiles    (int groupId, Handler<QList<ApiFile>> onOk,
                        ErrorHandler onError = {});
-    /// Idempotent: re-registering the same content hash returns the existing
-    /// record instead of failing, so two members may add the same PDF freely.
-    void registerFile (int groupId, const QString& contentHash,
-                       const QString& fileName, qint64 fileSizeBytes,
-                       int pageCount, Handler<ApiFile> onOk,
-                       ErrorHandler onError = {});
+    /// Idempotent, two ways. Re-registering a @p uuid this client already used
+    /// in the group repoints the existing record at @p contentHash instead of
+    /// creating a second one — the same file, annotated since — and a uuid the
+    /// group has never seen falls back to matching by content hash, so two
+    /// members may add the same unmodified PDF freely.
+    void registerFile (int groupId, const QString& uuid,
+                       const QString& contentHash, const QString& fileName,
+                       qint64 fileSizeBytes, int pageCount,
+                       Handler<ApiFile> onOk, ErrorHandler onError = {});
     /// Take a file out of a group. With @p deleteStoredCopy the bytes are also
     /// destroyed in cloud storage — irreversible, owner-only, and refused by
     /// the server for anyone else. The server skips the destruction (and says
