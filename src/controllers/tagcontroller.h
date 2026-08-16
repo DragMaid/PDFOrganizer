@@ -30,6 +30,11 @@ public:
 
     void initialize();   ///< Load tags from DB → TagModel
 
+    /// The current local vocabulary, in the order TagModel holds it. A thin
+    /// passthrough — used by callers (TagManagerDialog) that need to draw the
+    /// tag list without a group to ask the server for it.
+    [[nodiscard]] QStringList allTagNames() const;
+
     // ── Tag CRUD ──────────────────────────────────────────────────────────────
     bool createTag(const QString& name);
     bool deleteTag(const QString& name);

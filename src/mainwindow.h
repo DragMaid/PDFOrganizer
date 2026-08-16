@@ -36,6 +36,15 @@ class FolderPanel;
 class ListView;
 class GridView;
 class RecentView;
+class TagManagerDialog;
+
+/// A create, rename, or delete of a tag *name* — as opposed to assigning one
+/// to a file. Defined outside MainWindow, in tagmanagerdialog.h, because
+/// TagManagerDialog::vocabularyOpPending() carries it too and that dialog has
+/// no access to a private nested type of MainWindow. Scoped enums default to
+/// an int underlying type, so a bare forward declaration here is legal; the
+/// full definition is pulled in wherever the values are actually used.
+enum class TagVocabOp;
 
 /**
  * @brief Application shell: assembles all controllers, models, and views.
@@ -383,6 +392,20 @@ private:
     void syncNextPendingTag(int groupId, QList<int> pendingFiles, std::function<void()> onDone);
     void syncNextPendingNote(int groupId, QList<int> pendingFiles, std::function<void()> onDone);
     void syncNotesForFile(int groupId, int remoteFileId, int localFileId, QStringList notes, std::function<void()> onDone);
+    /// Drains pending_tag_ops for @p groupId's folder — one queued
+    /// create/rename/delete of a tag *name* per id in @p pendingOpIds. Runs
+    /// before the other three drains above, so a vocabulary edit has already
+    /// landed by the time a file's tag assignment might reference it.
+    void syncNextPendingTagOp(int groupId, QList<int> pendingOpIds, std::function<void()> onDone);
+    /// The subset of syncPendingData() safe to run on its own, outside of a
+    /// user-pressed Sync: vocabulary edits (group-level, no file involved)
+    /// and per-file tag/note edits for files *already* registered with the
+    /// group. Deliberately excludes syncNextPendingFile() — registering a new
+    /// file is a sync's job the user asks for, per trackFilesIn()'s own rule,
+    /// and quietly doing it here would let a file jump from "unregistered" to
+    /// "registered" between a sync-status badge being drawn and the user
+    /// acting on it, which is what made the badge lie.
+    void syncPendingTagsAndNotes(int groupId, const QString& folderPath);
 
     // ── Tags and notes, which are not a sync ──────────────────────────────────
     //
@@ -395,6 +418,15 @@ private:
     /// Send @p tags for @p filePath to its group now, in the background.
     void pushFileTags(int groupId, const QString& filePath, int localFileId,
                       const QStringList& tags);
+
+    /// A create, rename, or delete of a tag *name* — the vocabulary
+    /// counterpart of pushFileTags(). The local mirror (TagModel/DatabaseManager,
+    /// via TagController) has already been written by the caller before this
+    /// runs; this only tries to tell @p folderPath's group about it, queuing
+    /// the edit in pending_tag_ops when there is no group yet, no connection,
+    /// or the attempt fails.
+    void pushTagVocabularyOp(const QString& folderPath, TagVocabOp op,
+                             const QString& tagName, const QString& newName = {});
     /// Backend file id for @p filePath in @p groupId, or -1 when the group has
     /// not been told about it. Unlike resolveRemoteFile() this never registers
     /// anything: asking whether a file is known must not be what makes it known.

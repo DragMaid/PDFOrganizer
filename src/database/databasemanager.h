@@ -28,6 +28,12 @@
  *                                              said it landed. See below.
  *   folder_groups(folder_path, group_id)     – directory → the backend group
  *                                              holding the PDFs directly in it
+ *   pending_tag_ops(folder_path, op, tag_name, new_name)
+ *                                            – a create/rename/delete of a tag
+ *                                              *name* made while folder_path
+ *                                              had no group, or that failed to
+ *                                              push — replayed against the
+ *                                              group once one exists.
  *
  * All public methods are synchronous and should be called from the main thread.
  * Heavy scanning work is done in FolderWatcher on a worker thread; only the
@@ -74,6 +80,44 @@ public:
     QStringList     getPendingNotes(int fileId) const;
     bool            clearPendingNotes(int fileId);
     QList<int>      getFilesWithPendingNotes() const;
+
+    // ── Pending tag vocabulary ops ────────────────────────────────────────────
+    // Creating, renaming or deleting a tag *name* — as opposed to assigning one
+    // to a file, see setPendingTags() above — while its folder has no backend
+    // group yet, or while a push to one failed. Kept by folder path rather than
+    // group id for the same reason an unregistered file is: the group may not
+    // exist yet, and is resolved lazily by the same code that resolves a file.
+    struct PendingTagOp
+    {
+        int     id = -1;
+        QString folderPath;
+        QString op;        ///< "create" | "rename" | "delete"
+        QString tagName;   ///< create/delete: the name; rename: the name the server still knows it by
+        QString newName;   ///< rename only
+    };
+
+    /// Queue @p op ("create"/"rename"/"delete") for @p tagName in
+    /// @p folderPath's eventual group. Collapses against whatever is already
+    /// queued for the same (folderPath, tagName) so a rename or delete of a
+    /// tag that was itself created here and never pushed rewrites or drops
+    /// that pending create instead of queuing an op the server has no id to
+    /// apply — see the .cpp for the exact collapsing rules.
+    bool                    queuePendingTagOp(const QString& folderPath, const QString& op,
+                                              const QString& tagName, const QString& newName = {});
+    /// Ids of every op still queued for @p folderPath, oldest first — paired
+    /// with pendingTagOp(id) the same way getFilesWithPendingTags() is paired
+    /// with a PdfFile lookup by the callers that drain it.
+    QList<int>              pendingTagOpIds(const QString& folderPath) const;
+    /// One queued op's full details, or a row with id == -1 if @p id no
+    /// longer exists (already drained by a concurrent call).
+    PendingTagOp            pendingTagOp(int id) const;
+    /// Drop one op once it has been pushed, or found moot at drain time.
+    bool                    removePendingTagOp(int id);
+    /// Every tag name with a pending *create* row, across every folder. Used
+    /// to stop a tag made offline and never pushed from being purged by
+    /// applyRemoteVocabulary() just because the server does not know about it
+    /// yet.
+    QStringList             pendingTagCreateNames() const;
 
     // ── Settings key-value ────────────────────────────────────────────────────
     QVariant        getSetting(const QString& key, const QVariant& defaultValue = {}) const;

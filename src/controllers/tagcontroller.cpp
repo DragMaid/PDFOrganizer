@@ -18,6 +18,11 @@ void TagController::initialize()
     m_tagModel->resetTags(m_db->loadTags());
 }
 
+QStringList TagController::allTagNames() const
+{
+    return m_tagModel->allTags();
+}
+
 // ── Tag CRUD ──────────────────────────────────────────────────────────────────
 
 bool TagController::createTag(const QString& name)
@@ -129,6 +134,14 @@ QStringList TagController::applyRemoteVocabulary(const QStringList& names)
             if (!unsent.contains(tag, Qt::CaseInsensitive))
                 unsent << tag;
         }
+    }
+    // A tag can also be waiting to go up with nobody tagged with it yet — made
+    // in the tag manager, not assigned to a file, so no pending_tags flag
+    // points at it. Without this it would vanish the moment the server's
+    // answer arrives, before its own queued create ever gets a chance to run.
+    for (const QString& tag : m_db->pendingTagCreateNames()) {
+        if (!unsent.contains(tag, Qt::CaseInsensitive))
+            unsent << tag;
     }
 
     // Rebuild the local table so tags deleted by a teammate disappear here too.

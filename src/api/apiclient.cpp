@@ -63,6 +63,14 @@ void ApiClient::connectWebSocket() {
       QJsonDocument doc(auth);
       m_webSocket->sendTextMessage(
           QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+
+      // Only a genuine reconnect after a drop is news; the first connect
+      // right after signing in has nothing queued that sign-in isn't already
+      // handling.
+      if (m_realtimeWasDown) {
+        m_realtimeWasDown = false;
+        emit backOnline();
+      }
     });
 
     connect(m_webSocket, &QWebSocket::textMessageReceived, this,
@@ -88,6 +96,7 @@ void ApiClient::connectWebSocket() {
 
     connect(m_webSocket, &QWebSocket::disconnected, this, [this]() {
       if (!m_accessToken.isEmpty()) {
+        m_realtimeWasDown = true;
         QTimer::singleShot(5000, this, &ApiClient::connectWebSocket);
       }
     });

@@ -194,6 +194,11 @@ signals:
     /// The same change, named: which group, which file, and who did it. Use it
     /// to refresh only the part of the UI the event actually touches.
     void remoteEvent(const ApiRemoteEvent& event);
+    /// The realtime socket just came back up after having gone down while
+    /// still signed in — this device may have work queued from while it was
+    /// away. Not emitted for the first connect right after signing in; that
+    /// case is already covered by whatever ran the sign-in.
+    void backOnline();
 
 private:
     using RawHandler = std::function<void(const QJsonDocument&)>;
@@ -225,5 +230,9 @@ private:
     ApiUser               m_user;
     bool                  m_refreshing = false;
     QWebSocket*           m_webSocket = nullptr;
+    /// Set when the socket drops while signed in, cleared (and backOnline()
+    /// emitted) on the reconnect that follows — so the very first connect
+    /// after sign-in, which starts with this false, stays silent.
+    bool                  m_realtimeWasDown = false;
     void connectWebSocket();
 };

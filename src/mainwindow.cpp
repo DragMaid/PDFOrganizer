@@ -615,6 +615,12 @@ void MainWindow::connectSignals() {
   // Someone else changed something shared, so this machine's ahead/behind
   // counts are stale — the indicators say so without anyone clicking anything.
   connect(m_api, &ApiClient::remoteEvent, this, &MainWindow::onRemoteEvent);
+  // The realtime socket just came back after a drop — whatever this device
+  // queued while it (or the network under it) was down may now be able to go
+  // up. reconcileFolderGroups() is the same entry point sign-in already uses
+  // for this, and is cheap to call again when there is nothing new to do.
+  connect(m_api, &ApiClient::backOnline, this,
+          &MainWindow::reconcileFolderGroups);
 
   // A tag going away is the one vocabulary change that can leave the UI lying:
   // the chip disappears but the filter behind it does not, so the file list
@@ -831,15 +837,10 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
   if (!f.isValid())
     return;
 
+  // Tags are edited against the local mirror regardless of group/login state
+  // — groupId may be -1, and pushFileTags() already knows how to queue an
+  // edit rather than lose it when that's the case.
   const int groupId = activeGroupId();
-  if (groupId < 0) {
-    QMessageBox::information(
-        this, QStringLiteral("No Group Yet"),
-        QStringLiteral("Tags belong to the group of the file's folder. Sign in "
-                       "and wait for '%1' to finish being shared.")
-            .arg(groupNameForFolder(groupFolderFor(filePath))));
-    return;
-  }
 
   // Build a simple tag-assignment dialog
   QDialog dlg(this);
@@ -847,9 +848,14 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
   dlg.setMinimumWidth(320);
 
   auto *layout = new QVBoxLayout(&dlg);
-  layout->addWidget(new QLabel(
-      QStringLiteral("Tags for this file in '%1':").arg(activeGroup().name),
-      &dlg));
+  const QString labelText =
+      groupId >= 0
+          ? QStringLiteral("Tags for this file in '%1':").arg(activeGroup().name)
+          : QStringLiteral(
+                "Tags for this file — not yet shared with a group; they'll "
+                "go up once '%1' finishes syncing:")
+                .arg(groupNameForFolder(groupFolderFor(filePath)));
+  layout->addWidget(new QLabel(labelText, &dlg));
 
   auto *listWidget = new QListWidget(&dlg);
   const QStringList allTags = m_tagModel->allTags();
@@ -967,6 +973,91 @@ void MainWindow::pushFileTags(int groupId, const QString &filePath,
         if (!error.isNetworkFailure())
           showError(error);
       });
+}
+
+void MainWindow::pushTagVocabularyOp(const QString &folderPath, TagVocabOp op,
+                                     const QString &tagName,
+                                     const QString &newName) {
+  static const auto opName = [](TagVocabOp o) {
+    switch (o) {
+    case TagVocabOp::Create:
+      return QStringLiteral("create");
+    case TagVocabOp::Rename:
+      return QStringLiteral("rename");
+    case TagVocabOp::Delete:
+      return QStringLiteral("delete");
+    }
+    return QString();
+  };
+
+  const int groupId = groupIdForFolder(folderPath);
+  const auto queue = [this, folderPath, op, tagName, newName]() {
+    m_db->queuePendingTagOp(folderPath, opName(op), tagName, newName);
+  };
+
+  if (groupId < 0 || !m_api->isAuthenticated()) {
+    queue();
+    showActivity(QStringLiteral("Tag change saved on this machine — it goes "
+                                "up once '%1' is shared")
+                     .arg(groupNameForFolder(folderPath)),
+                 6000);
+    return;
+  }
+
+  const auto onFail = [this, queue](const ApiError &error) {
+    queue();
+    showActivity(
+        QStringLiteral("Tag change saved here — it goes up on the next sync"),
+        8000);
+    if (!error.isNetworkFailure())
+      showError(error);
+  };
+
+  if (op == TagVocabOp::Create) {
+    m_api->createTag(
+        groupId, tagName,
+        [this](const ApiTag &) { showActivity(QStringLiteral("✓ Tag saved"), 4000); },
+        onFail);
+    return;
+  }
+
+  // Rename/delete: the local mirror has no stored server-side id for a
+  // group's tag, so it is resolved by name against the group's current
+  // vocabulary first — the same lazy-by-name shape resolveRemoteFile() uses
+  // for files.
+  m_api->listGroupTags(
+      groupId,
+      [this, groupId, op, tagName, newName, onFail](const QList<ApiTag> &tags) {
+        int foundId = -1;
+        for (const ApiTag &t : tags) {
+          if (t.name.compare(tagName, Qt::CaseInsensitive) == 0) {
+            foundId = t.id;
+            break;
+          }
+        }
+        if (foundId < 0) {
+          // Not on the server under this name — a teammate already renamed
+          // or deleted it, or this device's record is stale. Nothing to
+          // force; the next reloadTagVocabulary() corrects the local mirror.
+          showActivity(QStringLiteral("Tag change had nothing to apply — "
+                                      "vocabulary already up to date"),
+                       6000);
+          return;
+        }
+        if (op == TagVocabOp::Rename)
+          m_api->renameTag(
+              groupId, foundId, newName,
+              [this](const ApiTag &) {
+                showActivity(QStringLiteral("✓ Tag renamed"), 4000);
+              },
+              onFail);
+        else
+          m_api->deleteTag(
+              groupId, foundId,
+              [this]() { showActivity(QStringLiteral("✓ Tag deleted"), 4000); },
+              onFail);
+      },
+      onFail);
 }
 
 QString MainWindow::localPathForRemoteFile(int groupId, int remoteFileId) {
@@ -1583,6 +1674,11 @@ void MainWindow::syncFolderGroup(const QString &folderPath) {
   const int mapped = groupIdForFolder(folderPath);
   if (mapped >= 0) {
     trackFilesIn(mapped, folderPath);
+    // Whatever this folder's tags queued while it had no group — or while
+    // the last attempt to reach this one failed — rides along now. Files
+    // still unregistered are left for trackFilesIn()'s banner and an actual
+    // sync, not registered quietly here.
+    syncPendingTagsAndNotes(mapped, folderPath);
     return;
   }
 
@@ -1597,6 +1693,7 @@ void MainWindow::syncFolderGroup(const QString &folderPath) {
     if (previous.isValid() && !previous.isPersonal) {
       m_db->storeFolderGroup(folderPath, previous.id, previous.name);
       trackFilesIn(previous.id, folderPath);
+      syncPendingTagsAndNotes(previous.id, folderPath);
       refreshDetailPane();
       return;
     }
@@ -1615,6 +1712,7 @@ void MainWindow::syncFolderGroup(const QString &folderPath) {
   if (existing.isValid() && existing.isOwner() && !existing.isPersonal) {
     m_db->storeFolderGroup(folderPath, existing.id, existing.name);
     trackFilesIn(existing.id, folderPath);
+    syncPendingTagsAndNotes(existing.id, folderPath);
     refreshDetailPane();
     return;
   }
@@ -1633,6 +1731,7 @@ void MainWindow::syncFolderGroup(const QString &folderPath) {
         m_db->storeFolderGroup(folderPath, group.id, group.name);
         reloadGroups([this, folderPath, group]() {
           trackFilesIn(group.id, folderPath);
+          syncPendingTagsAndNotes(group.id, folderPath);
           refreshDetailPane();
         });
       },
@@ -1699,33 +1798,61 @@ MainWindow::SyncPlan MainWindow::planSync(int groupId,
   // now, is content: a file this machine has already registered keeps the
   // same uuid across an edit, so an annotated PDF is still "here" as far as
   // this comparison cares.
+  // A local file answers to two names, and the group may know it by either.
+  // Its uuid is the usual one — but when the backend joined this file to a
+  // listing already held under someone else's uuid (same content, registered
+  // there first), the only name the two sides share is that listing's id. Both
+  // are collected, or a file the group demonstrably has reads as one it has
+  // never heard of.
   QSet<QString> localUuids;
+  QSet<int> localRemoteIds;
   for (const QString &filePath : filesIn(folderPath)) {
     // Empty means this path has never been registered with anyone, so it
     // cannot be what any of the group's entries refer to.
     const QString uuid = m_db->fileUuid(filePath);
-    if (!uuid.isEmpty())
-      localUuids.insert(uuid);
+    if (uuid.isEmpty())
+      continue;
+    localUuids.insert(uuid);
+    const int remoteId = m_db->remoteFileId(groupId, uuid);
+    if (remoteId >= 0)
+      localRemoteIds.insert(remoteId);
   }
 
+  const auto heldHere = [&localUuids, &localRemoteIds](const ApiFile &file) {
+    return localUuids.contains(file.uuid) || localRemoteIds.contains(file.id);
+  };
+
   QSet<QString> groupUuids;
+  QSet<int> groupFileIds;
   for (const ApiFile &file : status.files) {
     groupUuids.insert(file.uuid);
+    groupFileIds.insert(file.id);
     // Stored for the group but absent here: a download. A file nobody has
     // uploaded yet is not — there is nothing to fetch.
-    if (file.uploaded && !localUuids.contains(file.uuid))
+    if (file.uploaded && !heldHere(file))
       plan.toDownload << file;
   }
 
   // Registered but never uploaded, and we are the ones holding it.
   for (const ApiFile &file : status.pending) {
-    if (localUuids.contains(file.uuid))
+    if (heldHere(file))
       plan.toUpload << file;
   }
 
   for (const QString &filePath : filesIn(folderPath)) {
     const QString uuid = m_db->fileUuid(filePath);
-    if (uuid.isEmpty() || !groupUuids.contains(uuid))
+    if (uuid.isEmpty()) {
+      ++plan.unregistered;
+      continue;
+    }
+    if (groupUuids.contains(uuid))
+      continue;
+    // Not named in the group's list under this uuid, but registration handed
+    // back a listing id that *is* in it: this is the second local copy of a
+    // PDF the group already has. It is shared — counting it as an upload would
+    // badge a folder that no sync could ever bring down to zero.
+    const int remoteId = m_db->remoteFileId(groupId, uuid);
+    if (remoteId < 0 || !groupFileIds.contains(remoteId))
       ++plan.unregistered;
   }
 
@@ -1781,12 +1908,21 @@ void MainWindow::applyFileSyncStates(int groupId,
   const QString groupName =
       group.isValid() ? group.name : groupNameForFolder(folderPath);
 
+  // By uuid and by listing id both, for the reason planSync() spells out: a
+  // second local copy of a PDF the group already holds is listed under the
+  // uuid that got there first, and matching on uuid alone would draw it as a
+  // file only this machine has.
   QSet<QString> uploaded;
   QSet<QString> registered;
+  QSet<int> uploadedIds;
+  QSet<int> registeredIds;
   for (const ApiFile &file : status.files) {
     registered.insert(file.uuid);
-    if (file.uploaded)
+    registeredIds.insert(file.id);
+    if (file.uploaded) {
       uploaded.insert(file.uuid);
+      uploadedIds.insert(file.id);
+    }
   }
 
   const QSet<int> pendingMeta = filesWithPendingMetadata(folderPath);
@@ -1799,10 +1935,11 @@ void MainWindow::applyFileSyncStates(int groupId,
     // overwriting it here would flicker it back to amber mid-upload.
     if (m_pdfModel->syncState(file.filePath) != PdfModel::SyncTransferring) {
       const QString uuid = m_db->fileUuid(file.filePath);
-      if (uploaded.contains(uuid)) {
+      const int remoteId = m_db->remoteFileId(groupId, uuid);
+      if (uploaded.contains(uuid) || uploadedIds.contains(remoteId)) {
         markFileSyncState(file.filePath, PdfModel::SyncSynced,
                           QStringLiteral("Stored for '%1'.").arg(groupName));
-      } else if (registered.contains(uuid)) {
+      } else if (registered.contains(uuid) || registeredIds.contains(remoteId)) {
         markFileSyncState(
             file.filePath, PdfModel::SyncLocalOnly,
             QStringLiteral("Listed in '%1', but nobody has uploaded its "
@@ -1905,6 +2042,16 @@ void MainWindow::refreshSyncCountsFor(int groupId, bool force) {
 
         updateSyncButton();
         updateSyncIndicators();
+
+        // Something moved while this very question was in flight — a
+        // registration finishing, or a teammate's event arriving — and
+        // markSyncPending() could only leave the mark, because the guard above
+        // turns it away while a request for this group is outstanding. Asking
+        // again is what keeps that mark from being lost: without it the counts
+        // stay at what was true *before* the change, which is how a folder ends
+        // up badged "↑1 to upload" while a sync finds nothing left to send.
+        if (m_syncStale.contains(groupId))
+          refreshSyncCountsFor(groupId, false);
       },
       [this, groupId](const ApiError &) {
         // An unreachable server is not worth a modal here — the indicators keep
@@ -2189,8 +2336,29 @@ void MainWindow::resolveRemoteFile(
   // still land on one record.
   m_api->registerFile(
       groupId, uuid, hash, info.fileName(), info.size(), local.pageCount,
-      [this, groupId, uuid, hash, onReady](const ApiFile &file) {
-        m_db->storeRemoteFileId(groupId, uuid, file.id, hash);
+      [this, groupId, filePath, uuid, hash, onReady](const ApiFile &file) {
+        // The listing answers under its own uuid, and that is not always the
+        // one just sent: a uuid the group has never seen whose *content* it
+        // already holds joins the existing listing, and that listing keeps
+        // whichever uuid got there first — a teammate's, or this machine's own
+        // for a second copy of the same PDF. Adopting it is what stops this
+        // machine tracking a file by a name the group will never say back.
+        // Without it the group's list and this folder never line up: every
+        // later comparison reads the file as one the group has never been told
+        // about, so the folder stays badged "to upload" with nothing a sync can
+        // do about it. Downloads already adopt for the same reason.
+        QString tracked = uuid;
+        if (!file.uuid.isEmpty() && file.uuid != uuid) {
+          // One path per uuid: the identity table enforces it, and the row that
+          // already holds this one is a *different* local copy of the same
+          // content, not this file. It keeps its own uuid and is recognised by
+          // the listing id instead — see planSync().
+          const QString owner = m_db->pathForUuid(file.uuid);
+          if ((owner.isEmpty() || owner == filePath) &&
+              m_db->adoptFileUuid(filePath, file.uuid))
+            tracked = file.uuid;
+        }
+        m_db->storeRemoteFileId(groupId, tracked, file.id, hash);
         onReady(file.id);
       },
       onFailed); // empty → ApiClient falls back to the modal
@@ -3075,6 +3243,23 @@ void MainWindow::runSync(int groupId, const ApiGroup &group,
   const QString folderPath = m_db->folderForGroup(groupId);
 
   if (plan.toUpload.isEmpty() && plan.toDownload.isEmpty()) {
+    // "Nothing to move" and "up to date" are not the same sentence. The badge,
+    // the banner and the Sync button all count an unregistered file as an
+    // upload, so claiming this folder is up to date while any remain would
+    // contradict the three indicators still pointing at it — and syncPendingData
+    // has already had its go at registering them by the time we get here, so
+    // these are the ones it could not.
+    if (plan.unregistered > 0) {
+      showActivity(QStringLiteral("⚠ '%1' — %2 file(s) could not be shared "
+                                  "with the group; try syncing again")
+                       .arg(group.name)
+                       .arg(plan.unregistered),
+                   8000);
+      finishSync(groupId);
+      refreshAllSyncCounts(true);
+      return;
+    }
+
     // Not worth a modal: the user asked a question and the answer is "nothing".
     // Interrupting them to say so would be the only interruption in the whole
     // flow, and it would be the one carrying the least news.
@@ -3189,19 +3374,141 @@ void MainWindow::syncPendingData(int groupId, std::function<void()> onDone) {
     return kept;
   };
 
-  // Registrations first, then the edits waiting on them: this is the moment a
-  // tag written on a file nobody had shared yet finally has somewhere to go.
-  syncNextPendingFile(groupId, pendingFiles, [this, groupId, folderPath,
-                                              onlyMine, onDone]() {
-    const QList<int> pendingTags = onlyMine(m_db->getFilesWithPendingTags());
-    syncNextPendingTag(groupId, pendingTags, [this, groupId, folderPath,
-                                              onlyMine, onDone]() {
-      const QList<int> pendingNotes = onlyMine(m_db->getFilesWithPendingNotes());
-      syncNextPendingNote(groupId, pendingNotes,
-                          [this, folderPath, onDone]() {
-                            refreshPendingMetaMarks(folderPath);
-                            onDone();
-                          });
+  // Vocabulary edits first, then registrations, then the per-file edits
+  // waiting on them: a rename or delete of a tag name should already have
+  // landed by the time a file's own tag assignment might reference it, and a
+  // file nobody had shared yet finally has somewhere to go once registered.
+  const QList<int> pendingOps = m_db->pendingTagOpIds(folderPath);
+  syncNextPendingTagOp(groupId, pendingOps, [this, groupId, folderPath,
+                                             pendingFiles, onlyMine, onDone]() {
+    syncNextPendingFile(groupId, pendingFiles, [this, groupId, folderPath,
+                                                onlyMine, onDone]() {
+      const QList<int> pendingTags = onlyMine(m_db->getFilesWithPendingTags());
+      syncNextPendingTag(groupId, pendingTags, [this, groupId, folderPath,
+                                                onlyMine, onDone]() {
+        const QList<int> pendingNotes = onlyMine(m_db->getFilesWithPendingNotes());
+        syncNextPendingNote(groupId, pendingNotes,
+                            [this, folderPath, onDone]() {
+                              refreshPendingMetaMarks(folderPath);
+                              // onDone is optional — callers that only want
+                              // the drain to happen (syncFolderGroup's, e.g.)
+                              // pass none.
+                              if (onDone)
+                                onDone();
+                            });
+      });
+    });
+  });
+}
+
+void MainWindow::syncNextPendingTagOp(int groupId, QList<int> pendingOpIds,
+                                      std::function<void()> onDone) {
+  if (pendingOpIds.isEmpty()) {
+    onDone();
+    return;
+  }
+  const int opId = pendingOpIds.takeFirst();
+  const DatabaseManager::PendingTagOp op = m_db->pendingTagOp(opId);
+  if (op.id < 0) {
+    // Gone already — a concurrent drain (sign-in and a reconnect landing
+    // close together) beat this one to it.
+    syncNextPendingTagOp(groupId, pendingOpIds, onDone);
+    return;
+  }
+
+  const auto done = [this, groupId, pendingOpIds, onDone, opId]() {
+    m_db->removePendingTagOp(opId);
+    syncNextPendingTagOp(groupId, pendingOpIds, onDone);
+  };
+  // Left queued on failure — retried on the next drain rather than blocking
+  // whatever else is waiting behind it.
+  const auto skip = [this, groupId, pendingOpIds, onDone]() {
+    syncNextPendingTagOp(groupId, pendingOpIds, onDone);
+  };
+
+  if (op.op == QStringLiteral("create")) {
+    m_api->createTag(
+        groupId, op.tagName, [done](const ApiTag &) { done(); },
+        [skip](const ApiError &) { skip(); });
+    return;
+  }
+
+  // Rename/delete: the local mirror has no stored server-side id for a
+  // group's tag, so it is resolved by name against the group's current
+  // vocabulary first — the same lazy-by-name shape resolveRemoteFile() uses
+  // for files.
+  m_api->listGroupTags(
+      groupId,
+      [this, groupId, op, done, skip](const QList<ApiTag> &tags) {
+        int foundId = -1;
+        for (const ApiTag &t : tags) {
+          if (t.name.compare(op.tagName, Qt::CaseInsensitive) == 0) {
+            foundId = t.id;
+            break;
+          }
+        }
+        if (foundId < 0) {
+          // Already gone (or renamed) on the server under this name —
+          // nothing left to apply. reloadTagVocabulary() reconciles the
+          // local mirror if this device's copy was actually wrong.
+          done();
+          return;
+        }
+        if (op.op == QStringLiteral("rename"))
+          m_api->renameTag(groupId, foundId, op.newName,
+                           [done](const ApiTag &) { done(); },
+                           [skip](const ApiError &) { skip(); });
+        else
+          m_api->deleteTag(groupId, foundId, [done]() { done(); },
+                           [skip](const ApiError &) { skip(); });
+      },
+      [skip](const ApiError &) { skip(); });
+}
+
+void MainWindow::syncPendingTagsAndNotes(int groupId, const QString &folderPath) {
+  if (groupId < 0 || folderPath.isEmpty())
+    return;
+
+  // Only files the group already knows about — an unregistered file's tags
+  // or notes stay queued until an actual sync registers it. Checked once up
+  // front rather than per-drain-step, since knownRemoteFileId() never
+  // registers anything itself (that's the whole reason it's safe to call
+  // outside of a sync) but a stale answer would still be wrong to act on.
+  const QSet<int> mine = filesWithPendingMetadata(folderPath);
+  const auto registeredOnly = [this, groupId](const QList<int> &ids) {
+    const QList<PdfFile> all = m_pdfModel->allFiles();
+    QList<int> kept;
+    for (const int fileId : ids) {
+      for (const PdfFile &f : all) {
+        if (f.id == fileId && knownRemoteFileId(groupId, f.filePath) >= 0) {
+          kept << fileId;
+          break;
+        }
+      }
+    }
+    return kept;
+  };
+
+  const QList<int> pendingOps = m_db->pendingTagOpIds(folderPath);
+  syncNextPendingTagOp(groupId, pendingOps, [this, groupId, folderPath, mine,
+                                             registeredOnly]() {
+    QList<int> pendingTags;
+    for (const int fileId : m_db->getFilesWithPendingTags())
+      if (mine.contains(fileId))
+        pendingTags << fileId;
+    pendingTags = registeredOnly(pendingTags);
+
+    syncNextPendingTag(groupId, pendingTags, [this, groupId, folderPath, mine,
+                                              registeredOnly]() {
+      QList<int> pendingNotes;
+      for (const int fileId : m_db->getFilesWithPendingNotes())
+        if (mine.contains(fileId))
+          pendingNotes << fileId;
+      pendingNotes = registeredOnly(pendingNotes);
+
+      syncNextPendingNote(groupId, pendingNotes, [this, folderPath]() {
+        refreshPendingMetaMarks(folderPath);
+      });
     });
   });
 }
@@ -3218,8 +3525,20 @@ void MainWindow::syncNextPendingFile(int groupId, QStringList pending,
       [this, groupId, pending, onDone](int) {
         syncNextPendingFile(groupId, pending, onDone);
       },
-      [onDone](const ApiError &) {
-        onDone(); // continue even if failed
+      [this, groupId, pending, onDone](const ApiError &error) {
+        // One file failing is not the rest failing: a PDF that cannot be read
+        // here, or one the server rejects on its own merits, must not strand
+        // every file queued behind it as unregistered — they would be counted
+        // as uploads by a badge that no sync could then clear.
+        //
+        // An unreachable server is the one exception. Every file after this one
+        // would only wait out the same timeout to reach the same answer, so the
+        // queue stops and stays queued for the next attempt.
+        if (error.isNetworkFailure()) {
+          onDone();
+          return;
+        }
+        syncNextPendingFile(groupId, pending, onDone);
       });
 }
 
@@ -3373,21 +3692,28 @@ void MainWindow::onSearchTextChanged(const QString &text) {
 }
 
 void MainWindow::openTagManager() {
-  const int groupId = activeGroupId();
-  if (groupId < 0) {
-    QMessageBox::information(
-        this, QStringLiteral("No Group Selected"),
-        QStringLiteral("A tag vocabulary belongs to a group, and a group comes "
-                       "from a watched folder. Sign in and select a file to "
-                       "manage its folder's tags."));
+  // The vocabulary is edited against the local mirror regardless of
+  // group/login state, exactly like onEditTagsRequested() — there just has to
+  // be a folder in context to name in the dialog title and to queue edits
+  // against until it has a group.
+  const QString folderPath = activeFolderPath();
+  if (folderPath.isEmpty())
     return;
-  }
 
-  TagManagerDialog dlg(m_api, groupId, activeGroup().name, this);
+  const int groupId = activeGroupId();
+  const QString groupName =
+      groupId >= 0 ? activeGroup().name : groupNameForFolder(folderPath);
+
+  TagManagerDialog dlg(m_api, m_tagCtrl, folderPath, groupId, groupName, this);
   connect(&dlg, &TagManagerDialog::tagsChanged, this, [this]() {
     reloadTagVocabulary();
     m_folderPanel->refresh();
   });
+  connect(&dlg, &TagManagerDialog::vocabularyOpPending, this,
+          [this, folderPath](TagVocabOp op, const QString &name,
+                             const QString &newName) {
+            pushTagVocabularyOp(folderPath, op, name, newName);
+          });
   dlg.exec();
   m_folderPanel->refresh();
 }
