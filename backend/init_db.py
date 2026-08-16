@@ -23,6 +23,33 @@ from app import models  # noqa: F401 - imported so Base knows every table
 from app.models import new_share_code
 
 
+def reset_file_identity_schema() -> bool:
+    """Drop and recreate ``group_files``/``file_tags``/``notes`` if they predate
+    the per-file uuid identity.
+
+    File identity moved from content hash to a client-assigned uuid on
+    ``group_files``, which needs its own primary key — not a new column, which
+    is all ``create_all`` and the ``ALTER TABLE`` approach used elsewhere in
+    this file can add to an existing table. This project carries no migration
+    framework by design (see the module docstring), so the honest fix is the
+    same one used everywhere else here: recreate the affected tables and let
+    clients re-sync. Groups, memberships and users are untouched — only files,
+    tags and notes are dropped, and only on a database still on the old shape.
+    A fresh or already-migrated database is unaffected.
+    """
+    inspector = inspect(engine)
+    if "group_files" not in inspector.get_table_names():
+        return False
+    columns = {column["name"] for column in inspector.get_columns("group_files")}
+    if "id" in columns:
+        return False
+
+    with engine.begin() as connection:
+        for table in ("notes", "file_tags", "group_files"):
+            connection.execute(text(f"DROP TABLE IF EXISTS {table} CASCADE"))
+    return True
+
+
 def backfill_share_codes() -> int:
     """Add ``groups.share_code`` where missing and fill in a code per row.
 
@@ -69,12 +96,19 @@ def backfill_share_codes() -> int:
 
 
 def main() -> int:
+    reset = reset_file_identity_schema()
     Base.metadata.create_all(bind=engine)
     filled = backfill_share_codes()
 
     tables = sorted(inspect(engine).get_table_names())
     print(f"Schema ready on {engine.url.render_as_string(hide_password=True)}")
     print("Tables: " + ", ".join(tables))
+    if reset:
+        print(
+            "Recreated group_files/file_tags/notes for the new per-file uuid "
+            "identity — existing files, tags and notes were dropped. Clients "
+            "pick everything back up on their next sync."
+        )
     if filled:
         print(f"Generated share codes for {filled} existing group(s).")
     return 0

@@ -129,6 +129,7 @@ ApiFile ApiFile::fromJson(const QJsonObject& obj)
 {
     ApiFile file;
     file.id            = obj.value(QStringLiteral("id")).toInt(-1);
+    file.uuid          = obj.value(QStringLiteral("uuid")).toString();
     file.contentHash   = obj.value(QStringLiteral("content_hash")).toString();
     file.fileName      = obj.value(QStringLiteral("file_name")).toString();
     file.fileSizeBytes = static_cast<qint64>(

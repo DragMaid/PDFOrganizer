@@ -112,6 +112,10 @@ ApiClient::ApiClient(QObject *parent) : QObject(parent) {
   m_nam.setAutoDeleteReplies(false);
 }
 
+bool ApiClient::isRealtimeConnected() const {
+  return m_webSocket && m_webSocket->state() == QAbstractSocket::ConnectedState;
+}
+
 ApiClient::~ApiClient() = default;
 
 void ApiClient::setBaseUrl(const QUrl &baseUrl) { m_baseUrl = baseUrl; }
@@ -475,11 +479,13 @@ void ApiClient::listFiles(int groupId, Handler<QList<ApiFile>> onOk,
       std::move(onError));
 }
 
-void ApiClient::registerFile(int groupId, const QString &contentHash,
+void ApiClient::registerFile(int groupId, const QString &uuid,
+                             const QString &contentHash,
                              const QString &fileName, qint64 fileSizeBytes,
                              int pageCount, Handler<ApiFile> onOk,
                              ErrorHandler onError) {
   QJsonObject body{
+      {QStringLiteral("uuid"), uuid},
       {QStringLiteral("content_hash"), contentHash},
       {QStringLiteral("file_name"), fileName},
       {QStringLiteral("file_size_bytes"), static_cast<double>(fileSizeBytes)},

@@ -34,6 +34,14 @@ void SettingsDialog::buildUi()
     m_defaultViewCbo->addItem(QStringLiteral("Grid View"),  QStringLiteral("grid"));
     form->addRow(QStringLiteral("Default view:"), m_defaultViewCbo);
 
+    m_showFolderPanelCheck =
+        new QCheckBox(QStringLiteral("Show folder panel"), this);
+    form->addRow(m_showFolderPanelCheck);
+
+    m_showRecentPanelCheck =
+        new QCheckBox(QStringLiteral("Show details/recent panel"), this);
+    form->addRow(m_showRecentPanelCheck);
+
     root->addWidget(appearGrp);
 
     // ── Account ───────────────────────────────────────────────────────────────
@@ -79,6 +87,11 @@ void SettingsDialog::loadSettings()
     const int idx = m_defaultViewCbo->findData(view);
     m_defaultViewCbo->setCurrentIndex(idx >= 0 ? idx : 0);
 
+    m_showFolderPanelCheck->setChecked(
+        m_db->getSetting(QStringLiteral("showFolderPanel"), true).toBool());
+    m_showRecentPanelCheck->setChecked(
+        m_db->getSetting(QStringLiteral("showRecentPanel"), true).toBool());
+
     m_originalServer = m_db->getSetting(QStringLiteral("serverUrl")).toString();
     m_serverEdit->setText(m_originalServer);
 
@@ -99,6 +112,12 @@ void SettingsDialog::accept()
     m_db->setSetting(QStringLiteral("darkMode"), dark);
     m_db->setSetting(QStringLiteral("defaultView"),
                      m_defaultViewCbo->currentData().toString());
+
+    const bool showFolderPanel = m_showFolderPanelCheck->isChecked();
+    const bool showRecentPanel = m_showRecentPanelCheck->isChecked();
+    m_db->setSetting(QStringLiteral("showFolderPanel"), showFolderPanel);
+    m_db->setSetting(QStringLiteral("showRecentPanel"), showRecentPanel);
+    emit panelsChanged(showFolderPanel, showRecentPanel);
 
     const bool stay = m_staySignedInCheck->isChecked();
     m_db->setSetting(QStringLiteral("staySignedIn"), stay);

@@ -2,16 +2,27 @@
 
 Identity and scoping rules that the rest of the backend depends on:
 
-* A **file** is identified by the SHA-256 of its *content*, not by its path.
-  Two members who hold the same PDF at different paths on different machines
-  resolve to the same ``files`` row, which is what lets them share tags, notes
-  and a single uploaded blob.
+* A **file** (``files``) is content-addressed: keyed by the SHA-256 of its
+  bytes, and shared — blob and all — by every group that happens to hold the
+  same content. It exists purely for storage dedup and never appears in an
+  API response as an identity a client should remember.
+* A **group's listing of a file** (``group_files``) is the identity clients
+  actually track, anchored by ``client_uuid`` — a value a client assigns once,
+  the first time it sees a PDF, and keeps for as long as it tracks that file
+  locally. Registering the same uuid again repoints ``file_id`` at whatever
+  content came with the call, which is what lets a PDF be annotated (new
+  bytes, new content hash) without losing the tags and notes attached to it:
+  those hang off ``group_files.id``, which does not change just because the
+  bytes did. A uuid the group has never seen falls back to matching by content
+  hash instead, so two members registering an unmodified PDF for the first
+  time still resolve to one listing.
 * A file becomes visible through ``group_files``. Nothing outside a group is
   readable, so every permission check reduces to "is the caller a member of
   this group".
-* **Tags and notes are group-scoped.** A file may live in several groups; a
-  note written in one group must not leak into another, so both carry an
-  explicit ``group_id`` rather than hanging off the file alone.
+* **Tags and notes are group-scoped**, and — since the move to per-listing
+  identity — group-file-scoped: both carry a foreign key to the ``group_files``
+  row they belong to rather than to the shared content, so the same PDF
+  registered in two groups keeps two independent sets of tags and notes.
 * A group's ``share_code`` is a **bearer credential**: whoever holds it can join
   the group. It is therefore random and opaque, never the sequential ``id``,
   which anyone could count up through.
@@ -154,7 +165,11 @@ class GroupMember(Base):
 
 
 class File(Base):
-    """A PDF, keyed by content hash and shared across every group that holds it."""
+    """A PDF's content, keyed by hash and shared across every group that holds it.
+
+    Purely a storage-dedup row: see ``GroupFile`` for the identity a client
+    actually tracks.
+    """
 
     __tablename__ = "files"
 
@@ -181,14 +196,27 @@ class File(Base):
 
 
 class GroupFile(Base):
+    """One group's listing of a file — the identity a client tracks.
+
+    ``id`` and ``client_uuid`` outlive the content: re-registering the same
+    ``client_uuid`` with a different ``file_id`` (an annotated PDF, re-scanned)
+    repoints this row rather than creating a second listing, so the tags and
+    notes hanging off ``id`` survive the edit.
+    """
+
     __tablename__ = "group_files"
 
+    id: Mapped[int] = mapped_column(primary_key=True)
     group_id: Mapped[int] = mapped_column(
-        ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
     )
     file_id: Mapped[int] = mapped_column(
-        ForeignKey("files.id", ondelete="CASCADE"), primary_key=True
+        ForeignKey("files.id", ondelete="CASCADE"), nullable=False
     )
+    # Client-assigned and stable for as long as that client tracks the file
+    # locally. Unique per group, not globally — two different groups may each
+    # have been handed the same uuid by the same client for the same folder.
+    client_uuid: Mapped[str] = mapped_column(String(64), nullable=False)
     display_name: Mapped[str] = mapped_column(String(500), nullable=False)
     added_by: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
@@ -197,7 +225,11 @@ class GroupFile(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    __table_args__ = (Index("ix_group_files_file", "file_id"),)
+    __table_args__ = (
+        UniqueConstraint("group_id", "client_uuid", name="uq_group_files_uuid"),
+        Index("ix_group_files_file", "file_id"),
+        Index("ix_group_files_group", "group_id"),
+    )
 
 
 class Tag(Base):
@@ -229,8 +261,9 @@ class Tag(Base):
 class FileTag(Base):
     __tablename__ = "file_tags"
 
-    file_id: Mapped[int] = mapped_column(
-        ForeignKey("files.id", ondelete="CASCADE"), primary_key=True
+    # References the group's listing, not the shared content — see GroupFile.
+    group_file_id: Mapped[int] = mapped_column(
+        ForeignKey("group_files.id", ondelete="CASCADE"), primary_key=True
     )
     tag_id: Mapped[int] = mapped_column(
         ForeignKey("tags.id", ondelete="CASCADE"), primary_key=True
@@ -252,8 +285,9 @@ class Note(Base):
     group_id: Mapped[int] = mapped_column(
         ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
     )
-    file_id: Mapped[int] = mapped_column(
-        ForeignKey("files.id", ondelete="CASCADE"), nullable=False
+    # References the group's listing, not the shared content — see GroupFile.
+    group_file_id: Mapped[int] = mapped_column(
+        ForeignKey("group_files.id", ondelete="CASCADE"), nullable=False
     )
     author_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False
@@ -274,4 +308,4 @@ class Note(Base):
 
     author: Mapped[User] = relationship()
 
-    __table_args__ = (Index("ix_notes_group_file", "group_id", "file_id"),)
+    __table_args__ = (Index("ix_notes_group_file", "group_id", "group_file_id"),)

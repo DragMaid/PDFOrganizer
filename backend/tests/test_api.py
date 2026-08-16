@@ -12,6 +12,7 @@ The rules under test, in the words they were specified in:
 from __future__ import annotations
 
 import hashlib
+import uuid as uuid_module
 
 HASH_A = hashlib.sha256(b"pdf-a").hexdigest()
 HASH_B = hashlib.sha256(b"pdf-b").hexdigest()
@@ -28,10 +29,13 @@ def shared_group(owner, *members):
     return group_id
 
 
-def register_file(account, group_id, content_hash=HASH_A, name="paper.pdf"):
+def register_file(account, group_id, content_hash=HASH_A, name="paper.pdf", uuid=None):
+    """Register a file as a fresh client would: a uuid it has never used before,
+    unless the caller passes one to simulate the same client re-registering."""
     response = account.post(
         f"/groups/{group_id}/files",
         json={
+            "uuid": uuid or str(uuid_module.uuid4()),
             "content_hash": content_hash,
             "file_name": name,
             "file_size_bytes": 1234,
@@ -295,15 +299,42 @@ def test_same_pdf_registered_twice_resolves_to_one_record(alice, bob):
     assert len(alice.get(f"/groups/{group_id}/files").json()) == 1
 
 
+def test_reregistering_the_same_uuid_with_new_content_keeps_tags_and_notes(alice):
+    """Annotating a PDF changes its bytes, and so its content hash — but a
+    client re-registering it with the uuid it already tracked must land on the
+    same listing, not a second one that orphans the tags and notes."""
+    group_id = shared_group(alice)
+    client_uuid = str(uuid_module.uuid4())
+    file = register_file(alice, group_id, HASH_A, "a.pdf", uuid=client_uuid)
+
+    alice.post(f"/groups/{group_id}/files/{file['id']}/tags", json={"name": "kept"})
+    alice.post(f"/groups/{group_id}/files/{file['id']}/notes", json={"body": "kept note"})
+
+    reregistered = register_file(alice, group_id, HASH_B, "a.pdf", uuid=client_uuid)
+
+    # Same listing, repointed at the new content.
+    assert reregistered["id"] == file["id"]
+    assert reregistered["uuid"] == client_uuid
+    assert reregistered["content_hash"] == HASH_B
+
+    tags = alice.get(f"/groups/{group_id}/files/{file['id']}/tags").json()
+    assert [t["name"] for t in tags] == ["kept"]
+    notes = alice.get(f"/groups/{group_id}/files/{file['id']}/notes").json()
+    assert [n["body"] for n in notes] == ["kept note"]
+
+    # Not a duplicate listing.
+    assert len(alice.get(f"/groups/{group_id}/files").json()) == 1
+
+
 def test_removing_a_file_from_a_group_leaves_other_groups_alone(alice):
     first = shared_group(alice)
     second = alice.post("/groups", json={"name": "Second"}).json()["id"]
 
     file = register_file(alice, first)
-    register_file(alice, second)
+    other_listing = register_file(alice, second)
 
     alice.post(f"/groups/{first}/files/{file['id']}/tags", json={"name": "keep"})
-    alice.post(f"/groups/{second}/files/{file['id']}/tags", json={"name": "keep"})
+    alice.post(f"/groups/{second}/files/{other_listing['id']}/tags", json={"name": "keep"})
 
     removed = alice.delete(f"/groups/{first}/files/{file['id']}")
     assert removed.status_code == 200, removed.text
@@ -311,7 +342,7 @@ def test_removing_a_file_from_a_group_leaves_other_groups_alone(alice):
     assert removed.json()["purged"] is False
     assert alice.get(f"/groups/{first}/files").json() == []
     assert len(alice.get(f"/groups/{second}/files").json()) == 1
-    assert len(alice.get(f"/groups/{second}/files/{file['id']}/tags").json()) == 1
+    assert len(alice.get(f"/groups/{second}/files/{other_listing['id']}/tags").json()) == 1
 
 
 # ── Removing a file: detaching and destroying are different acts ──────────────
@@ -599,17 +630,17 @@ def test_notes_do_not_leak_between_groups_sharing_a_file(alice, bob):
     shared = shared_group(alice, bob)
     personal_id = next(g["id"] for g in alice.get("/groups").json() if g["is_personal"])
 
-    register_file(alice, shared)
+    shared_listing = register_file(alice, shared)
     file = register_file(alice, personal_id)
 
     alice.post(
         f"/groups/{personal_id}/files/{file['id']}/notes", json={"body": "just for me"}
     )
     alice.post(
-        f"/groups/{shared}/files/{file['id']}/notes", json={"body": "for the team"}
+        f"/groups/{shared}/files/{shared_listing['id']}/notes", json={"body": "for the team"}
     )
 
-    team_view = bob.get(f"/groups/{shared}/files/{file['id']}/notes").json()
+    team_view = bob.get(f"/groups/{shared}/files/{shared_listing['id']}/notes").json()
     assert [n["body"] for n in team_view] == ["for the team"]
 
 

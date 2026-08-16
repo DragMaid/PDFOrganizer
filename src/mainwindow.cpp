@@ -171,6 +171,15 @@ void MainWindow::initControllers() {
 
   m_api = new ApiClient(this);
 
+  // Only ever runs while signed in — started in onSignedIn(), stopped on
+  // sign-out or session expiry. Each tick is a no-op unless the realtime
+  // socket is down, so this costs nothing while push notifications are
+  // flowing normally.
+  m_notesPollTimer = new QTimer(this);
+  m_notesPollTimer->setInterval(10000);
+  connect(m_notesPollTimer, &QTimer::timeout, this,
+          &MainWindow::pollNotesIfDisconnected);
+
   m_watcher = new FolderWatcher(this);
   m_pdfCtrl = new PdfController(m_pdfModel, m_db, m_watcher, this);
   m_tagCtrl = new TagController(m_tagModel, m_pdfModel, m_db, this);
@@ -891,10 +900,10 @@ void MainWindow::onEditTagsRequested(const QString &filePath) {
 int MainWindow::knownRemoteFileId(int groupId, const QString &filePath) {
   if (groupId < 0 || filePath.isEmpty())
     return -1;
-  const QString hash = contentHashFor(filePath);
-  if (hash.isEmpty())
+  const QString uuid = m_db->fileUuid(filePath);
+  if (uuid.isEmpty())
     return -1;
-  return m_db->remoteFileId(groupId, hash);
+  return m_db->remoteFileId(groupId, uuid);
 }
 
 void MainWindow::pushFileTags(int groupId, const QString &filePath,
@@ -963,15 +972,7 @@ void MainWindow::pushFileTags(int groupId, const QString &filePath,
 QString MainWindow::localPathForRemoteFile(int groupId, int remoteFileId) {
   if (groupId < 0 || remoteFileId < 0)
     return {};
-  const QString folderPath = m_db->folderForGroup(groupId);
-  if (folderPath.isEmpty())
-    return {};
-
-  for (const QString &filePath : filesIn(folderPath)) {
-    if (knownRemoteFileId(groupId, filePath) == remoteFileId)
-      return filePath;
-  }
-  return {};
+  return m_db->pathForRemoteFile(groupId, remoteFileId);
 }
 
 void MainWindow::refreshRemoteFileTags(int groupId, int remoteFileId) {
@@ -1007,9 +1008,9 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
   const QString folderPath = groupFolderFor(filePath);
   const int groupId = groupIdForFolder(folderPath);
   const ApiGroup group = groupById(groupId);
-  const QString hash = contentHashFor(filePath);
-  const int remoteFileId = (groupId >= 0 && !hash.isEmpty())
-                               ? m_db->remoteFileId(groupId, hash)
+  const QString uuid = m_db->fileUuid(filePath);
+  const int remoteFileId = (groupId >= 0 && !uuid.isEmpty())
+                               ? m_db->remoteFileId(groupId, uuid)
                                : -1;
 
   if (!group.isValid() || remoteFileId < 0) {
@@ -1128,11 +1129,11 @@ void MainWindow::onRemoveFileRequested(const QString &filePath) {
 
   m_api->removeFile(
       groupId, remoteFileId, alsoPurge,
-      [this, groupId, hash, filePath, fileName, alsoDeleteLocal,
+      [this, groupId, uuid, filePath, fileName, alsoDeleteLocal,
        finished](const ApiFileRemoval &result) {
         // The cached id points at a link that no longer exists; leaving it
         // would make the next sync think the file is still registered.
-        m_db->forgetRemoteFile(groupId, hash);
+        m_db->forgetRemoteFile(groupId, uuid);
 
         QString status = QStringLiteral("✓ Removed %1").arg(fileName);
         if (alsoDeleteLocal) {
@@ -1206,14 +1207,56 @@ void MainWindow::restoreSessionOrPrompt() {
       m_db->getSetting(QStringLiteral("userDisplayName")).toString();
   m_api->restoreSession(refreshToken, saved);
 
-  // Spend the stored refresh token for a live session. A failure here is
-  // ordinary (the token expired), so it prompts rather than alarming the user.
-  m_api->refreshSession([this]() { onSignedIn(); },
+  m_sessionRestoreAttempts = 0;
+  attemptSessionRestore();
+}
+
+void MainWindow::attemptSessionRestore() {
+  // Spend the stored refresh token for a live session.
+  m_api->refreshSession([this]() {
+                          // Only worth clearing if a retry actually put
+                          // something there.
+                          if (m_sessionRestoreAttempts > 0)
+                            m_scanLabel->clear();
+                          onSignedIn();
+                        },
                         [this](const ApiError &error) {
-                          clearSavedSession();
-                          if (error.isNetworkFailure())
+                          // The token itself being rejected is the one
+                          // failure that is actually about credentials — the
+                          // equivalent of a wrong password — so it is the one
+                          // worth asking the user about. Anything else (the
+                          // server unreachable, or still waking up from a
+                          // cold boot on a host that sleeps between visits) is
+                          // worth trying again before bothering them.
+                          if (error.isAuthFailure()) {
+                            clearSavedSession();
+                            promptSignIn();
+                            return;
+                          }
+
+                          constexpr int kMaxAttempts = 6;
+                          ++m_sessionRestoreAttempts;
+                          if (m_sessionRestoreAttempts >= kMaxAttempts) {
+                            // The stored token is left alone: nothing said it
+                            // was wrong, only that the server could not be
+                            // reached, so it may still be good next time.
                             showError(error);
-                          promptSignIn();
+                            promptSignIn();
+                            return;
+                          }
+
+                          // Backs off 2s, 4s, 8s, 16s, 30s — long enough to
+                          // ride out a free-tier host coming back from sleep
+                          // without hammering it while it does.
+                          const int delayMs = qMin(
+                              30000, 2000 * (1 << (m_sessionRestoreAttempts - 1)));
+                          m_scanLabel->setText(
+                              QStringLiteral(
+                                  "Could not reach the server — retrying (%1/%2)…")
+                                  .arg(m_sessionRestoreAttempts)
+                                  .arg(kMaxAttempts));
+                          QTimer::singleShot(delayMs, this,
+                                             &MainWindow::attemptSessionRestore);
                         });
 }
 
@@ -1252,6 +1295,12 @@ void MainWindow::onSignedIn() {
   saveSession();
   setCollaborationEnabled(true);
 
+  // Notes for whatever is selected are worth asking for right away rather
+  // than waiting on the next event — refreshDetailPane() below would get to
+  // it anyway once groups reload, but that round trip can take a moment.
+  refreshNotes();
+  m_notesPollTimer->start();
+
   reloadGroups([this]() {
     reloadTagVocabulary();
     // Watched folders added while signed out — or on a previous run against a
@@ -1286,6 +1335,7 @@ void MainWindow::clearSavedSession() {
 void MainWindow::onSignOut() {
   m_api->clearSession();
   clearSavedSession();
+  m_notesPollTimer->stop();
 
   m_groups.clear();
   m_notes.clear();
@@ -1310,6 +1360,7 @@ void MainWindow::onSignOut() {
 
 void MainWindow::onSessionExpired() {
   clearSavedSession();
+  m_notesPollTimer->stop();
   setCollaborationEnabled(false);
   m_userLabel->setText(QStringLiteral("Not signed in"));
   promptSignIn();
@@ -1355,7 +1406,7 @@ void MainWindow::onRemoteEvent(const ApiRemoteEvent &event) {
     // refreshNotes() works that out from the selection, so the check here is
     // just to avoid a request for a note attached to some other file.
     const int shownFileId =
-        m_db->remoteFileId(event.groupId, contentHashFor(m_selectedFilePath));
+        m_db->remoteFileId(event.groupId, m_db->fileUuid(m_selectedFilePath));
     if (event.fileId < 0 || event.fileId == shownFileId)
       refreshNotes();
   }
@@ -1608,8 +1659,8 @@ void MainWindow::trackFilesIn(int groupId, const QString &folderPath) {
 
   QStringList pending;
   for (const QString &filePath : filesIn(folderPath)) {
-    const QString hash = contentHashFor(filePath);
-    if (hash.isEmpty() || m_db->remoteFileId(groupId, hash) >= 0)
+    const QString uuid = m_db->fileUuid(filePath);
+    if (!uuid.isEmpty() && m_db->remoteFileId(groupId, uuid) >= 0)
       continue;
     pending << filePath;
   }
@@ -1643,35 +1694,38 @@ MainWindow::SyncPlan MainWindow::planSync(int groupId,
   if (folderPath.isEmpty())
     return plan; // No local folder for this group: nothing to compare against.
 
-  // What this machine actually holds, by content. Names are irrelevant — the
-  // same PDF can sit under a different name on every member's disk.
-  QSet<QString> localHashes;
+  // What this machine actually holds, by identity. Names are irrelevant — the
+  // same PDF can sit under a different name on every member's disk — and so,
+  // now, is content: a file this machine has already registered keeps the
+  // same uuid across an edit, so an annotated PDF is still "here" as far as
+  // this comparison cares.
+  QSet<QString> localUuids;
   for (const QString &filePath : filesIn(folderPath)) {
-    // Empty means the file is gone from disk since the last scan; that is
-    // precisely the case this whole calculation exists for, so it is not
-    // treated as an error — the file simply is not here.
-    const QString hash = contentHashFor(filePath);
-    if (!hash.isEmpty())
-      localHashes.insert(hash);
+    // Empty means this path has never been registered with anyone, so it
+    // cannot be what any of the group's entries refer to.
+    const QString uuid = m_db->fileUuid(filePath);
+    if (!uuid.isEmpty())
+      localUuids.insert(uuid);
   }
 
-  QSet<QString> groupHashes;
+  QSet<QString> groupUuids;
   for (const ApiFile &file : status.files) {
-    groupHashes.insert(file.contentHash);
+    groupUuids.insert(file.uuid);
     // Stored for the group but absent here: a download. A file nobody has
     // uploaded yet is not — there is nothing to fetch.
-    if (file.uploaded && !localHashes.contains(file.contentHash))
+    if (file.uploaded && !localUuids.contains(file.uuid))
       plan.toDownload << file;
   }
 
   // Registered but never uploaded, and we are the ones holding it.
   for (const ApiFile &file : status.pending) {
-    if (localHashes.contains(file.contentHash))
+    if (localUuids.contains(file.uuid))
       plan.toUpload << file;
   }
 
-  for (const QString &hash : localHashes) {
-    if (!groupHashes.contains(hash))
+  for (const QString &filePath : filesIn(folderPath)) {
+    const QString uuid = m_db->fileUuid(filePath);
+    if (uuid.isEmpty() || !groupUuids.contains(uuid))
       ++plan.unregistered;
   }
 
@@ -1730,9 +1784,9 @@ void MainWindow::applyFileSyncStates(int groupId,
   QSet<QString> uploaded;
   QSet<QString> registered;
   for (const ApiFile &file : status.files) {
-    registered.insert(file.contentHash);
+    registered.insert(file.uuid);
     if (file.uploaded)
-      uploaded.insert(file.contentHash);
+      uploaded.insert(file.uuid);
   }
 
   const QSet<int> pendingMeta = filesWithPendingMetadata(folderPath);
@@ -1744,11 +1798,11 @@ void MainWindow::applyFileSyncStates(int groupId,
     // A file being moved right now owns its own dot until the transfer ends;
     // overwriting it here would flicker it back to amber mid-upload.
     if (m_pdfModel->syncState(file.filePath) != PdfModel::SyncTransferring) {
-      const QString hash = contentHashFor(file.filePath);
-      if (uploaded.contains(hash)) {
+      const QString uuid = m_db->fileUuid(file.filePath);
+      if (uploaded.contains(uuid)) {
         markFileSyncState(file.filePath, PdfModel::SyncSynced,
                           QStringLiteral("Stored for '%1'.").arg(groupName));
-      } else if (registered.contains(hash)) {
+      } else if (registered.contains(uuid)) {
         markFileSyncState(
             file.filePath, PdfModel::SyncLocalOnly,
             QStringLiteral("Listed in '%1', but nobody has uploaded its "
@@ -2087,6 +2141,10 @@ QString MainWindow::contentHashFor(const QString &filePath) {
   return hash;
 }
 
+QString MainWindow::fileUuidFor(const QString &filePath) {
+  return m_db->ensureFileUuid(filePath);
+}
+
 void MainWindow::resolveRemoteFile(
     int groupId, const QString &filePath, std::function<void(int)> onReady,
     std::function<void(const ApiError &)> onFailed) {
@@ -2110,8 +2168,12 @@ void MainWindow::resolveRemoteFile(
     return;
   }
 
-  const int cached = m_db->remoteFileId(groupId, hash);
-  if (cached >= 0) {
+  const QString uuid = fileUuidFor(filePath);
+
+  // Cached and still current: nothing about this file has changed since it
+  // was last registered, so there is nothing worth a round trip for.
+  const int cached = m_db->remoteFileId(groupId, uuid);
+  if (cached >= 0 && m_db->registeredHash(uuid) == hash) {
     onReady(cached);
     return;
   }
@@ -2119,12 +2181,16 @@ void MainWindow::resolveRemoteFile(
   const PdfFile local = m_pdfModel->fileByPath(filePath);
   const QFileInfo info(filePath);
 
-  // Registration is idempotent on the backend: if another member already
-  // added this exact PDF we get their record back instead of an error.
+  // Registration is idempotent on the backend, two ways: repeating the same
+  // uuid repoints this exact listing at whatever content came with it — which
+  // is what happens here when the cache above missed because the file was
+  // annotated since — and a uuid the group has never seen falls back to
+  // matching by content, so two members registering the same unmodified PDF
+  // still land on one record.
   m_api->registerFile(
-      groupId, hash, info.fileName(), info.size(), local.pageCount,
-      [this, groupId, hash, onReady](const ApiFile &file) {
-        m_db->storeRemoteFileId(groupId, hash, file.id);
+      groupId, uuid, hash, info.fileName(), info.size(), local.pageCount,
+      [this, groupId, uuid, hash, onReady](const ApiFile &file) {
+        m_db->storeRemoteFileId(groupId, uuid, file.id, hash);
         onReady(file.id);
       },
       onFailed); // empty → ApiClient falls back to the modal
@@ -2237,6 +2303,16 @@ void MainWindow::onAddNote() {
       });
 }
 
+void MainWindow::pollNotesIfDisconnected() {
+  if (!m_api->isAuthenticated())
+    return;
+  // Push events already cover this while the socket is up; polling on top of
+  // that would just be redundant traffic for the same information.
+  if (m_api->isRealtimeConnected())
+    return;
+  refreshNotes();
+}
+
 void MainWindow::refreshNotes() {
   // Clear the existing bubbles first so a failed reload does not leave stale
   // notes on screen.
@@ -2269,9 +2345,9 @@ void MainWindow::refreshNotes() {
     return;
   }
 
-  const QString hash = contentHashFor(m_selectedFilePath);
+  const QString uuid = m_db->fileUuid(m_selectedFilePath);
   const int remoteFileId =
-      hash.isEmpty() ? -1 : m_db->remoteFileId(groupId, hash);
+      uuid.isEmpty() ? -1 : m_db->remoteFileId(groupId, uuid);
   if (remoteFileId < 0) {
     // Not registered in this group yet — the server cannot have notes for it,
     // and we should not register a file just because it was clicked on.
@@ -2900,11 +2976,14 @@ void MainWindow::downloadNext(int groupId, const QString &folderPath,
        localPath, onDone]() {
         // Registering the file again after the scan would mean re-hashing it
         // and a round trip per file; both are already known, so they are cached
-        // now.
+        // now. Adopting the listing's own uuid — rather than minting a fresh
+        // local one — is what lets this machine recognise its own copy again
+        // the next time this same content is registered.
         const QFileInfo info(localPath);
         m_db->storeHash(localPath, file.contentHash, info.size(),
                         info.lastModified());
-        m_db->storeRemoteFileId(groupId, file.contentHash, file.id);
+        m_db->adoptFileUuid(localPath, file.uuid);
+        m_db->storeRemoteFileId(groupId, file.uuid, file.id, file.contentHash);
         // The scan that turns it into a row has not run yet, so this is
         // remembered rather than drawn — applyFileSyncStates picks it up.
         markFileSyncState(localPath, PdfModel::SyncSynced,
@@ -3088,8 +3167,8 @@ void MainWindow::syncPendingData(int groupId, std::function<void()> onDone) {
   QStringList pendingFiles;
   if (!folderPath.isEmpty()) {
     for (const QString &filePath : filesIn(folderPath)) {
-      const QString hash = contentHashFor(filePath);
-      if (hash.isEmpty() || m_db->remoteFileId(groupId, hash) >= 0)
+      const QString uuid = m_db->fileUuid(filePath);
+      if (!uuid.isEmpty() && m_db->remoteFileId(groupId, uuid) >= 0)
         continue;
       pendingFiles << filePath;
     }
@@ -3250,15 +3329,11 @@ void MainWindow::uploadNext(int groupId, QList<ApiFile> pending, int uploaded,
 
   const ApiFile file = pending.takeFirst();
 
-  // The backend knows the file by content hash; we have to find the copy on
-  // this machine to send.
-  QString localPath;
-  for (const PdfFile &candidate : m_pdfModel->allFiles()) {
-    if (contentHashFor(candidate.filePath) == file.contentHash) {
-      localPath = candidate.filePath;
-      break;
-    }
-  }
+  // The backend knows the file by its listing; the local path that maps to
+  // its uuid is the copy on this machine to send, if it is still there.
+  QString localPath = m_db->pathForUuid(file.uuid);
+  if (!localPath.isEmpty() && !QFileInfo::exists(localPath))
+    localPath.clear();
 
   if (localPath.isEmpty()) {
     // Another member registered it; we simply do not hold a copy to upload.
@@ -3321,6 +3396,8 @@ void MainWindow::openSettings() {
   SettingsDialog dlg(m_db, this);
   connect(&dlg, &SettingsDialog::darkModeChanged, this,
           &MainWindow::applyDarkTheme);
+  connect(&dlg, &SettingsDialog::panelsChanged, this,
+          &MainWindow::applyPanelVisibility);
   connect(&dlg, &SettingsDialog::serverChanged, this,
           [this](const QString &serverUrl) {
             // A different server means different accounts and ids entirely.
@@ -3749,6 +3826,35 @@ QWidget *MainWindow::buildMemberRow(const ApiMember &member,
   return row;
 }
 
+void MainWindow::applyPanelVisibility(bool showFolderPanel,
+                                      bool showRecentPanel) {
+  constexpr int kFolderDefaultWidth = 220;
+  constexpr int kRecentDefaultWidth = 280;
+
+  const bool folderWasVisible = m_folderPanel->isVisible();
+  const bool recentWasVisible = m_rightTabs->isVisible();
+
+  m_folderPanel->setVisible(showFolderPanel);
+  m_rightTabs->setVisible(showRecentPanel);
+
+  // While a panel stays shown across the change, its width is left alone —
+  // that is the user's manual resize to keep. Only a panel that just came
+  // back from being hidden snaps to its default; there is no "last width" to
+  // remember for something that was not on screen to be dragged.
+  QList<int> sizes = m_splitter->sizes();
+  if (showFolderPanel && !folderWasVisible)
+    sizes[0] = kFolderDefaultWidth;
+  else if (!showFolderPanel)
+    sizes[0] = 0;
+
+  if (showRecentPanel && !recentWasVisible)
+    sizes[2] = kRecentDefaultWidth;
+  else if (!showRecentPanel)
+    sizes[2] = 0;
+
+  m_splitter->setSizes(sizes);
+}
+
 void MainWindow::applyDarkTheme(bool enabled) {
   if (!enabled) {
     qApp->setStyleSheet(QString{});
@@ -4014,6 +4120,10 @@ void MainWindow::restoreLayout() {
   // Dark mode default ON
   const bool dark = m_db->getSetting(QStringLiteral("darkMode"), true).toBool();
   applyDarkTheme(dark);
+
+  applyPanelVisibility(
+      m_db->getSetting(QStringLiteral("showFolderPanel"), true).toBool(),
+      m_db->getSetting(QStringLiteral("showRecentPanel"), true).toBool());
 
   // Default view
   const QString view =

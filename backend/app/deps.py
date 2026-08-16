@@ -67,11 +67,18 @@ def group_or_404(db: Session, group_id: int, user: User) -> tuple[Group, GroupMe
 def group_file_or_404(
     db: Session, group_id: int, file_id: int
 ) -> tuple[File, GroupFile]:
-    link = db.get(GroupFile, {"group_id": group_id, "file_id": file_id})
-    # TODO: add proper file meta here later
-    if link is None:
+    """Resolve a group's listing by its own id (GroupFile.id, not File.id).
+
+    ``file_id`` here is the id a client got back from registering — the
+    per-group listing — not the content-addressed row backing it, which can
+    change underneath a listing when the file is re-registered with new
+    content. Checking ``group_id`` here is what stops one group's listing id
+    from being usable against another group.
+    """
+    link = db.get(GroupFile, file_id)
+    if link is None or link.group_id != group_id:
         raise not_found("That file")
-    file = db.get(File, file_id)
+    file = db.get(File, link.file_id)
     if file is None:
         raise not_found("That file")
     return file, link

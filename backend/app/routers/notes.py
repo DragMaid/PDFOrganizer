@@ -33,7 +33,7 @@ def _to_out(note: Note, author: User, viewer_id: int) -> NoteOut:
     return NoteOut(
         id=note.id,
         group_id=note.group_id,
-        file_id=note.file_id,
+        file_id=note.group_file_id,
         author_id=note.author_id,
         author_name=author.display_name,
         body=note.body,
@@ -67,7 +67,7 @@ def list_notes(
         .join(User, User.id == Note.author_id)
         .where(
             Note.group_id == group_id,
-            Note.file_id == file_id,
+            Note.group_file_id == file_id,
             Note.deleted_at.is_(None),
         )
         .order_by(Note.created_at)
@@ -97,7 +97,7 @@ def create_note(
 
     note = Note(
         group_id=group_id,
-        file_id=file_id,
+        group_file_id=file_id,
         author_id=user.id,
         body=body,
         version=1,
@@ -155,7 +155,7 @@ def update_note(
         background_tasks,
         note.group_id,
         "note_updated",
-        file_id=note.file_id,
+        file_id=note.group_file_id,
         note_id=note.id,
         actor_id=user.id,
     )
@@ -184,7 +184,7 @@ def delete_note(
         background_tasks,
         note.group_id,
         "note_deleted",
-        file_id=note.file_id,
+        file_id=note.group_file_id,
         note_id=note.id,
         actor_id=user.id,
     )

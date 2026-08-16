@@ -165,7 +165,7 @@ def list_file_tags(
         db.execute(
             select(Tag)
             .join(FileTag, FileTag.tag_id == Tag.id)
-            .where(FileTag.file_id == file_id, Tag.group_id == group_id)
+            .where(FileTag.group_file_id == file_id, Tag.group_id == group_id)
             .order_by(Tag.name)
         )
         .scalars()
@@ -194,8 +194,8 @@ def add_file_tag(
     tag = _get_or_create_tag(db, group_id, payload.name, user.id)
     db.execute(
         pg_insert(FileTag)
-        .values(file_id=file_id, tag_id=tag.id, added_by=user.id)
-        .on_conflict_do_nothing(index_elements=["file_id", "tag_id"])
+        .values(group_file_id=file_id, tag_id=tag.id, added_by=user.id)
+        .on_conflict_do_nothing(index_elements=["group_file_id", "tag_id"])
     )
     db.commit()
     notify(
@@ -239,7 +239,7 @@ def set_file_tags(
 
     keep_ids = [tag.id for tag in wanted]
     stale = delete(FileTag).where(
-        FileTag.file_id == file_id,
+        FileTag.group_file_id == file_id,
         FileTag.tag_id.in_(select(Tag.id).where(Tag.group_id == group_id)),
     )
     if keep_ids:
@@ -249,8 +249,8 @@ def set_file_tags(
     for tag in wanted:
         db.execute(
             pg_insert(FileTag)
-            .values(file_id=file_id, tag_id=tag.id, added_by=user.id)
-            .on_conflict_do_nothing(index_elements=["file_id", "tag_id"])
+            .values(group_file_id=file_id, tag_id=tag.id, added_by=user.id)
+            .on_conflict_do_nothing(index_elements=["group_file_id", "tag_id"])
         )
     db.commit()
     notify(
@@ -284,7 +284,7 @@ def remove_file_tag(
     if tag is None or tag.group_id != group_id:
         return
     db.execute(
-        delete(FileTag).where(FileTag.file_id == file_id, FileTag.tag_id == tag_id)
+        delete(FileTag).where(FileTag.group_file_id == file_id, FileTag.tag_id == tag_id)
     )
     db.commit()
     notify(
