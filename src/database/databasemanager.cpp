@@ -157,10 +157,24 @@ bool DatabaseManager::createSchema()
             )
         )"),
 
+        // A create/rename/delete of a tag *name* still waiting to reach a
+        // group — see the header doc comment for why this is keyed by folder
+        // path rather than group id.
+        QStringLiteral(R"(
+            CREATE TABLE IF NOT EXISTS pending_tag_ops (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                folder_path TEXT    NOT NULL,
+                op          TEXT    NOT NULL,
+                tag_name    TEXT    NOT NULL,
+                new_name    TEXT
+            )
+        )"),
+
         // Performance indexes
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_folder ON pdf_files(folder_path)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pdf_opened ON pdf_files(last_opened)"),
         QStringLiteral("CREATE INDEX IF NOT EXISTS idx_identity_remote ON file_identity(group_id, remote_file_id)"),
+        QStringLiteral("CREATE INDEX IF NOT EXISTS idx_pending_tag_ops_folder ON pending_tag_ops(folder_path)"),
     };
 
     for (const QString& stmt : ddl) {
@@ -770,6 +784,160 @@ QList<int> DatabaseManager::getFilesWithPendingNotes() const
     QSqlQuery q(QStringLiteral("SELECT DISTINCT pdf_id FROM pending_notes"), m_db);
     while (q.next())
         result << q.value(0).toInt();
+    return result;
+}
+
+// ── Pending tag vocabulary ops ────────────────────────────────────────────────
+//
+//  queuePendingTagOp() collapses against whatever is already queued for the
+//  same (folderPath, tagName) rather than inserting blindly. A tag that was
+//  itself created here and never reached the server has no server-side id
+//  for a later rename or delete to reference, so those cases rewrite or drop
+//  the pending create instead of ever becoming a rename/delete op.
+
+bool DatabaseManager::queuePendingTagOp(const QString& folderPath, const QString& op,
+                                        const QString& tagName, const QString& newName)
+{
+    QSqlQuery q(m_db);
+
+    if (op == QStringLiteral("create")) {
+        q.prepare(QStringLiteral(
+            "SELECT id FROM pending_tag_ops WHERE folder_path = :f AND op = 'create' "
+            "AND tag_name = :t COLLATE NOCASE"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        if (q.exec() && q.next())
+            return true; // already queued
+
+        q.prepare(QStringLiteral(
+            "INSERT INTO pending_tag_ops (folder_path, op, tag_name) VALUES (:f, 'create', :t)"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        return q.exec();
+    }
+
+    if (op == QStringLiteral("rename")) {
+        // Still unsent under this exact name — nothing to rename remotely;
+        // just change what the eventual create will be named.
+        q.prepare(QStringLiteral(
+            "SELECT id FROM pending_tag_ops WHERE folder_path = :f AND op = 'create' "
+            "AND tag_name = :t COLLATE NOCASE"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        if (q.exec() && q.next()) {
+            QSqlQuery upd(m_db);
+            upd.prepare(QStringLiteral("UPDATE pending_tag_ops SET tag_name = :n WHERE id = :id"));
+            upd.bindValue(QStringLiteral(":n"),  newName);
+            upd.bindValue(QStringLiteral(":id"), q.value(0).toInt());
+            return upd.exec();
+        }
+
+        // A chained or repeated rename landing on or starting from this name —
+        // fold it into one row (A→B, then B→C, becomes one A→C row) rather
+        // than queuing a second hop.
+        q.prepare(QStringLiteral(
+            "SELECT id FROM pending_tag_ops WHERE folder_path = :f AND op = 'rename' "
+            "AND (new_name = :t COLLATE NOCASE OR tag_name = :t COLLATE NOCASE)"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        if (q.exec() && q.next()) {
+            QSqlQuery upd(m_db);
+            upd.prepare(QStringLiteral("UPDATE pending_tag_ops SET new_name = :n WHERE id = :id"));
+            upd.bindValue(QStringLiteral(":n"),  newName);
+            upd.bindValue(QStringLiteral(":id"), q.value(0).toInt());
+            return upd.exec();
+        }
+
+        q.prepare(QStringLiteral(
+            "INSERT INTO pending_tag_ops (folder_path, op, tag_name, new_name) "
+            "VALUES (:f, 'rename', :t, :n)"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        q.bindValue(QStringLiteral(":n"), newName);
+        return q.exec();
+    }
+
+    if (op == QStringLiteral("delete")) {
+        // Never left this machine — the queued create is simply dropped.
+        q.prepare(QStringLiteral(
+            "SELECT id FROM pending_tag_ops WHERE folder_path = :f AND op = 'create' "
+            "AND tag_name = :t COLLATE NOCASE"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        if (q.exec() && q.next())
+            return removePendingTagOp(q.value(0).toInt());
+
+        // A queued rename landing on this name never reached the server
+        // either — drop the rename and delete under the name the server
+        // still actually knows the tag by.
+        q.prepare(QStringLiteral(
+            "SELECT id, tag_name FROM pending_tag_ops WHERE folder_path = :f "
+            "AND op = 'rename' AND new_name = :t COLLATE NOCASE"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        if (q.exec() && q.next()) {
+            const int id = q.value(0).toInt();
+            const QString originalName = q.value(1).toString();
+            removePendingTagOp(id);
+            return queuePendingTagOp(folderPath, QStringLiteral("delete"), originalName);
+        }
+
+        q.prepare(QStringLiteral(
+            "INSERT INTO pending_tag_ops (folder_path, op, tag_name) VALUES (:f, 'delete', :t)"));
+        q.bindValue(QStringLiteral(":f"), folderPath);
+        q.bindValue(QStringLiteral(":t"), tagName);
+        return q.exec();
+    }
+
+    return false;
+}
+
+QList<int> DatabaseManager::pendingTagOpIds(const QString& folderPath) const
+{
+    QList<int> result;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "SELECT id FROM pending_tag_ops WHERE folder_path = :f ORDER BY id ASC"));
+    q.bindValue(QStringLiteral(":f"), folderPath);
+    if (q.exec()) {
+        while (q.next())
+            result << q.value(0).toInt();
+    }
+    return result;
+}
+
+DatabaseManager::PendingTagOp DatabaseManager::pendingTagOp(int id) const
+{
+    PendingTagOp row;
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "SELECT folder_path, op, tag_name, new_name FROM pending_tag_ops WHERE id = :id"));
+    q.bindValue(QStringLiteral(":id"), id);
+    if (q.exec() && q.next()) {
+        row.id         = id;
+        row.folderPath = q.value(0).toString();
+        row.op         = q.value(1).toString();
+        row.tagName    = q.value(2).toString();
+        row.newName    = q.value(3).toString();
+    }
+    return row;
+}
+
+bool DatabaseManager::removePendingTagOp(int id)
+{
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral("DELETE FROM pending_tag_ops WHERE id = :id"));
+    q.bindValue(QStringLiteral(":id"), id);
+    return q.exec();
+}
+
+QStringList DatabaseManager::pendingTagCreateNames() const
+{
+    QStringList result;
+    QSqlQuery q(QStringLiteral(
+        "SELECT DISTINCT tag_name FROM pending_tag_ops WHERE op = 'create'"), m_db);
+    while (q.next())
+        result << q.value(0).toString();
     return result;
 }
 
