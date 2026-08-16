@@ -171,6 +171,15 @@ void MainWindow::initControllers() {
 
   m_api = new ApiClient(this);
 
+  // Only ever runs while signed in — started in onSignedIn(), stopped on
+  // sign-out or session expiry. Each tick is a no-op unless the realtime
+  // socket is down, so this costs nothing while push notifications are
+  // flowing normally.
+  m_notesPollTimer = new QTimer(this);
+  m_notesPollTimer->setInterval(10000);
+  connect(m_notesPollTimer, &QTimer::timeout, this,
+          &MainWindow::pollNotesIfDisconnected);
+
   m_watcher = new FolderWatcher(this);
   m_pdfCtrl = new PdfController(m_pdfModel, m_db, m_watcher, this);
   m_tagCtrl = new TagController(m_tagModel, m_pdfModel, m_db, this);
@@ -1286,6 +1295,12 @@ void MainWindow::onSignedIn() {
   saveSession();
   setCollaborationEnabled(true);
 
+  // Notes for whatever is selected are worth asking for right away rather
+  // than waiting on the next event — refreshDetailPane() below would get to
+  // it anyway once groups reload, but that round trip can take a moment.
+  refreshNotes();
+  m_notesPollTimer->start();
+
   reloadGroups([this]() {
     reloadTagVocabulary();
     // Watched folders added while signed out — or on a previous run against a
@@ -1320,6 +1335,7 @@ void MainWindow::clearSavedSession() {
 void MainWindow::onSignOut() {
   m_api->clearSession();
   clearSavedSession();
+  m_notesPollTimer->stop();
 
   m_groups.clear();
   m_notes.clear();
@@ -1344,6 +1360,7 @@ void MainWindow::onSignOut() {
 
 void MainWindow::onSessionExpired() {
   clearSavedSession();
+  m_notesPollTimer->stop();
   setCollaborationEnabled(false);
   m_userLabel->setText(QStringLiteral("Not signed in"));
   promptSignIn();
@@ -2284,6 +2301,16 @@ void MainWindow::onAddNote() {
         if (!error.isNetworkFailure())
           showError(error);
       });
+}
+
+void MainWindow::pollNotesIfDisconnected() {
+  if (!m_api->isAuthenticated())
+    return;
+  // Push events already cover this while the socket is up; polling on top of
+  // that would just be redundant traffic for the same information.
+  if (m_api->isRealtimeConnected())
+    return;
+  refreshNotes();
 }
 
 void MainWindow::refreshNotes() {
@@ -3369,6 +3396,8 @@ void MainWindow::openSettings() {
   SettingsDialog dlg(m_db, this);
   connect(&dlg, &SettingsDialog::darkModeChanged, this,
           &MainWindow::applyDarkTheme);
+  connect(&dlg, &SettingsDialog::panelsChanged, this,
+          &MainWindow::applyPanelVisibility);
   connect(&dlg, &SettingsDialog::serverChanged, this,
           [this](const QString &serverUrl) {
             // A different server means different accounts and ids entirely.
@@ -3797,6 +3826,35 @@ QWidget *MainWindow::buildMemberRow(const ApiMember &member,
   return row;
 }
 
+void MainWindow::applyPanelVisibility(bool showFolderPanel,
+                                      bool showRecentPanel) {
+  constexpr int kFolderDefaultWidth = 220;
+  constexpr int kRecentDefaultWidth = 280;
+
+  const bool folderWasVisible = m_folderPanel->isVisible();
+  const bool recentWasVisible = m_rightTabs->isVisible();
+
+  m_folderPanel->setVisible(showFolderPanel);
+  m_rightTabs->setVisible(showRecentPanel);
+
+  // While a panel stays shown across the change, its width is left alone —
+  // that is the user's manual resize to keep. Only a panel that just came
+  // back from being hidden snaps to its default; there is no "last width" to
+  // remember for something that was not on screen to be dragged.
+  QList<int> sizes = m_splitter->sizes();
+  if (showFolderPanel && !folderWasVisible)
+    sizes[0] = kFolderDefaultWidth;
+  else if (!showFolderPanel)
+    sizes[0] = 0;
+
+  if (showRecentPanel && !recentWasVisible)
+    sizes[2] = kRecentDefaultWidth;
+  else if (!showRecentPanel)
+    sizes[2] = 0;
+
+  m_splitter->setSizes(sizes);
+}
+
 void MainWindow::applyDarkTheme(bool enabled) {
   if (!enabled) {
     qApp->setStyleSheet(QString{});
@@ -4062,6 +4120,10 @@ void MainWindow::restoreLayout() {
   // Dark mode default ON
   const bool dark = m_db->getSetting(QStringLiteral("darkMode"), true).toBool();
   applyDarkTheme(dark);
+
+  applyPanelVisibility(
+      m_db->getSetting(QStringLiteral("showFolderPanel"), true).toBool(),
+      m_db->getSetting(QStringLiteral("showRecentPanel"), true).toBool());
 
   // Default view
   const QString view =

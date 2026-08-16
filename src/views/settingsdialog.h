@@ -26,6 +26,10 @@ signals:
     void darkModeChanged(bool enabled);
     /// The backend address changed, so the caller must sign in again.
     void serverChanged(const QString& serverUrl);
+    /// Either panel's visibility changed. A panel switched from hidden back to
+    /// shown should return to its default width rather than whatever size a
+    /// drag left it at before it was hidden.
+    void panelsChanged(bool showFolderPanel, bool showRecentPanel);
 
 private slots:
     void accept() override;
@@ -37,6 +41,8 @@ private:
     DatabaseManager* m_db;
     QCheckBox*  m_darkModeCheck     = nullptr;
     QComboBox*  m_defaultViewCbo    = nullptr;
+    QCheckBox*  m_showFolderPanelCheck = nullptr;
+    QCheckBox*  m_showRecentPanelCheck = nullptr;
     QLineEdit*  m_serverEdit        = nullptr;
     QLabel*     m_accountLabel      = nullptr;
     QCheckBox*  m_staySignedInCheck = nullptr;

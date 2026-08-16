@@ -112,6 +112,10 @@ ApiClient::ApiClient(QObject *parent) : QObject(parent) {
   m_nam.setAutoDeleteReplies(false);
 }
 
+bool ApiClient::isRealtimeConnected() const {
+  return m_webSocket && m_webSocket->state() == QAbstractSocket::ConnectedState;
+}
+
 ApiClient::~ApiClient() = default;
 
 void ApiClient::setBaseUrl(const QUrl &baseUrl) { m_baseUrl = baseUrl; }

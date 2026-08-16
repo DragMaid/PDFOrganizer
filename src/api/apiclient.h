@@ -175,6 +175,13 @@ public:
     /// Returns an empty string if the file cannot be read.
     static QString hashFile(const QString& localPath);
 
+    /// True while the realtime socket is up, meaning remote note/tag/file
+    /// changes arrive as push events (see remoteEvent()) and nothing needs to
+    /// poll for them. False while signed out, mid-reconnect, or never
+    /// connected — callers that care about staying current should fall back
+    /// to asking directly.
+    [[nodiscard]] bool isRealtimeConnected() const;
+
 signals:
     /// Emitted for any failure whose caller did not supply an error handler.
     void errorOccurred(const ApiError& error);

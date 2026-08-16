@@ -18,6 +18,7 @@ class QProgressBar;
 class QPushButton;
 class QTabWidget;
 class QTextEdit;
+class QTimer;
 class QVBoxLayout;
 
 class PdfModel;
@@ -140,6 +141,11 @@ private slots:
 
     // ── Notes ─────────────────────────────────────────────────────────────────
     void onAddNote();
+    /// Fires every 10s while signed in. The realtime socket already pushes
+    /// note changes the instant they happen, so this only actually asks the
+    /// server when that socket is down — it is the fallback, not the primary
+    /// path.
+    void pollNotesIfDisconnected();
 
     // ── Search ────────────────────────────────────────────────────────────────
     void onSearchTextChanged(const QString& text);
@@ -149,6 +155,9 @@ private slots:
     void openSettings();
     void updateStatusBar();
     void applyDarkTheme(bool enabled);
+    /// A panel switched from hidden to shown resets to its default width;
+    /// one left shown keeps whatever width the user dragged it to.
+    void applyPanelVisibility(bool showFolderPanel, bool showRecentPanel);
     void onScanFinished(const QString& folder);
 
 private:
@@ -516,6 +525,10 @@ private:
     QTextEdit*       m_noteEdit    = nullptr;
     QVBoxLayout*     m_notesLayout = nullptr;
     QPushButton*     m_addNoteBtn  = nullptr;
+    /// Fallback for when the realtime socket is down: asks for the selected
+    /// file's notes every 10s while signed in. Started in onSignedIn(),
+    /// stopped whenever the session ends.
+    QTimer*          m_notesPollTimer = nullptr;
     QPushButton*     m_renameGroupBtn = nullptr;
     QPushButton*     m_leaveGroupBtn  = nullptr;
     QPushButton*     m_syncBtn     = nullptr;
