@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PDF Organizer</title>
+  <meta name="description" content="A desktop PDF library for research groups. Point it at a folder and your team shares the same papers, tags and notes, always in sync. Free and open source for Linux, macOS and Windows.">
+  <meta name="theme-color" content="#111214">
+  <meta name="color-scheme" content="dark">
+
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="PDF Organizer: your team's papers, in one place">
+  <meta property="og:description" content="Tagged, discussed, and always in sync. Free for Linux, macOS and Windows.">
+  <meta property="og:image" content="img/og.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <link rel="icon" type="image/png" href="img/icon-64.png">
+  <link rel="apple-touch-icon" href="img/apple-touch-icon.png">
+  <link rel="preload" href="fonts/geist.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css">
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <nav class="wrap topbar__inner" aria-label="Primary">
+      <a class="brand" href="#top" aria-label="PDF Organizer home">
+        <img src="img/icon-64.png" alt="" width="28" height="28">
+        <span>PDF Organizer</span>
+      </a>
+      <ul class="topbar__links">
+        <li><a href="#features">Features</a></li>
+        <li><a href="#self-host">Self-host</a></li>
+        <li><a href="https://github.com/DragMaid/PDFOrganizer" class="topbar__gh">
+          <svg class="icon" aria-hidden="true"><use href="img/icons.svg#github"/></svg>GitHub</a></li>
+      </ul>
+      <a class="btn btn--small" href="#download">Download</a>
+    </nav>
+  </header>
+
+  <main id="main">
+    <!-- Hero -->
+    <section class="hero" id="top">
+      <div class="wrap hero__copy">
+        <h1>Your team's papers,<br> in one place.</h1>
+        <p class="hero__lede">Tagged, discussed, and always in sync. Point it at a folder and your whole group gets the same papers, tags and notes.</p>
+        <div class="hero__actions">
+          <a class="btn btn--primary" href="https://github.com/DragMaid/PDFOrganizer/releases/latest" data-download="auto">
+            <svg class="icon" aria-hidden="true"><use href="img/icons.svg#download"/></svg>
+            <span data-download-label>Download</span>
+          </a>
+          <a class="btn btn--ghost" href="#download">All platforms</a>
+        </div>
+        <p class="hero__meta"><span data-release-meta>Free and open source · Linux, macOS, Windows</span> · <a href="https://github.com/DragMaid/PDFOrganizer">Source on GitHub</a></p>
+      </div>
+
+      <div class="wrap wrap--wide">
+        <figure class="shot" data-tour>
+          <figcaption class="tour">
+            <button type="button" class="tour__stop" data-region="0,8,11.8,10.8">Folders become groups</button>
+            <button type="button" class="tour__stop" data-region="0.2,4.3,21.3,3.6">Live search</button>
+            <button type="button" class="tour__stop" data-region="13.2,8.4,59.8,73">Thumbnails with sync dots</button>
+            <button type="button" class="tour__stop" data-region="0,75.5,11.6,9">Tag filters</button>
+            <button type="button" class="tour__stop" data-region="81.5,18.6,17.5,16.6">Group, members, share code</button>
+            <button type="button" class="tour__stop" data-region="81.3,42.6,18.3,22.5">Notes on the paper</button>
+          </figcaption>
+          <div class="shot__frame">
+            <div class="shot__chrome" aria-hidden="true"><span></span><span></span><span></span></div>
+            <div class="shot__stage">
+              <img src="img/app.webp" srcset="img/app-1100.webp 1100w, img/app.webp 1920w" sizes="(min-width: 1320px) 1240px, 94vw"
+                   width="1920" height="1031" fetchpriority="high"
+                   alt="PDF Organizer in grid view: a folder tree on the left, a grid of paper thumbnails each with a green sync dot, and a details panel on the right showing the group, its share code, members and a note.">
+              <div class="shot__spot" data-spot aria-hidden="true"></div>
+            </div>
+          </div>
+        </figure>
+      </div>
+    </section>
+
+    <!-- The problem -->
+    <section class="problem">
+      <div class="wrap wrap--narrow">
+        <h2>No more “which version of the paper are we on?”</h2>
+        <p>Shared research runs on a shared drive, a group chat, and everyone's memory. Someone downloads a PDF, renames it <code>final_v3_REAL.pdf</code>, drops a thought in Slack, and three weeks later nobody can find either.</p>
+        <p class="problem__turn">PDF Organizer puts the file, the tags and the conversation in the same window.</p>
+      </div>
+    </section>
+
+    <!-- Features -->
+    <section class="features" id="features" aria-label="Features">
+      <article class="feature wrap">
+        <div class="feature__text">
+          <h2>A folder <em>is</em> a shared space.</h2>
+          <p>Add a directory and every folder inside it that holds a PDF becomes its own group, named after its path. Invite people and they get the same papers on their machine. There's no upload button to hunt for and no “did you get it?”.</p>
+          <p class="feature__aside">A folder that only holds other folders isn't shared on its own; it just organises the groups inside it.</p>
+        </div>
+        <div class="feature__visual">
+          <div class="tree" role="img" aria-label="Adding the folder Lab creates three groups: Lab, Lab/reading-group and Lab/reading-group/week-12.">
+            <div class="tree__head">Add <code>/home/me/Lab</code></div>
+            <ol class="tree__rows">
+              <li><span class="tree__file">thesis-draft.pdf</span><span class="tree__group">Lab</span></li>
+              <li><span class="tree__file"><i>reading-group/</i>attention.pdf</span><span class="tree__group">Lab/reading-group</span></li>
+              <li><span class="tree__file"><i>reading-group/</i>scaling-laws.pdf</span><span class="tree__group">Lab/reading-group</span></li>
+              <li><span class="tree__file"><i>reading-group/week-12/</i>rlhf.pdf</span><span class="tree__group">Lab/reading-group/week-12</span></li>
+            </ol>
+            <p class="tree__foot">Three folders, three groups, each with its own members.</p>
+          </div>
+        </div>
+      </article>
+
+      <article class="feature feature--flip wrap">
+        <div class="feature__text">
+          <h2>Tags and notes stay with the paper.</h2>
+          <p>Leave a thought on a PDF and your teammates see it right beside the file, not buried in a chat log. Tags are shared with the group and filter the library in one click.</p>
+          <dl class="rules">
+            <div><dt>Tags never fight.</dt><dd>Two people adding the same tag at once just works.</dd></div>
+            <div><dt>Notes keep their author.</dt><dd>Only you can edit your own notes. If someone else changed a note while you were editing it, your save is refused and you're shown the text you would have overwritten, so nothing is lost.</dd></div>
+          </dl>
+        </div>
+        <div class="feature__visual">
+          <figure class="crop">
+            <img src="img/details.webp" width="360" height="560" loading="lazy"
+                 alt="The details panel: the group papers/pdfphile, its share code, one member, and a note reading “Gud stuff” with Edit and Delete buttons.">
+          </figure>
+        </div>
+      </article>
+
+      <article class="feature wrap" id="sync">
+        <div class="feature__text">
+          <h2>Always know where you stand.</h2>
+          <p>Every file carries a coloured dot. Hover it and the tooltip says whether the group has it, and whether you have edits waiting to go up. Syncs run in the background with a live progress bar, so you can keep tagging and keep reading.</p>
+        </div>
+        <div class="feature__visual">
+          <figure class="crop crop--grid">
+            <img src="img/grid.webp" width="572" height="484" loading="lazy"
+                 alt="Six paper thumbnails from the grid view, each with a green dot in its corner: every file is shared with the group.">
+          </figure>
+          <ul class="states">
+            <li class="state state--shared"><span class="state__dot" aria-hidden="true"></span><strong>Shared</strong><span>The group has this file.</span></li>
+            <li class="state state--local"><span class="state__dot" aria-hidden="true"></span><strong>Only on this machine</strong><span>Not uploaded yet.</span></li>
+            <li class="state state--moving"><span class="state__dot" aria-hidden="true"></span><strong>Moving</strong><span>Uploading right now.</span></li>
+          </ul>
+          <p class="states__foot">Offline? Tags and notes you write are queued and go out with the next sync.</p>
+        </div>
+      </article>
+
+      <article class="feature feature--flip wrap">
+        <div class="feature__text">
+          <h2>Join with a code.</h2>
+          <p>Share a short code with a teammate. They paste it in and their copy of the group fills in on its own. Only the group's creator can rename it or manage members, and anyone can leave.</p>
+        </div>
+        <div class="feature__visual">
+          <div class="join" role="group" aria-label="Example: joining a group with a share code, drawn in the app's own controls">
+            <p class="join__title">Join a group</p>
+            <label class="join__label" for="demo-code">Share code</label>
+            <input id="demo-code" type="text" class="join__input" value="PDFORG-S5G2-QFR2-45PR" readonly spellcheck="false">
+            <div class="join__row">
+              <span class="join__btn" aria-hidden="true">Cancel</span>
+              <span class="join__btn" aria-hidden="true">Join</span>
+            </div>
+            <p class="join__ok">Joined papers/pdfphile · 17 files</p>
+</div>
+        </div>
+      </article>
+    </section>
+
+    <!-- Promises -->
+    <section class="promises" aria-labelledby="promises-h">
+      <div class="wrap">
+        <h2 id="promises-h">Built to get out of the way.</h2>
+        <div class="promises__grid">
+          <div class="promise"><h3>Nothing blocks.</h3><p>Tagging, notes and syncing are independent. You never have to sync before writing a tag, and a sync never freezes the window.</p></div>
+          <div class="promise"><h3>Nothing is silent.</h3><p>Every action reports back as a one-line status message, not a pop-up you have to dismiss. Errors say what went wrong in plain English.</p></div>
+          <div class="promise"><h3>Nothing is a mystery.</h3><p>Hover any file to see whether the group has it and whether your edits are still waiting to upload.</p></div>
+          <div class="promise"><h3>Nothing is lost.</h3><p>Tags and notes written offline wait for the next sync. If a note changed under you, your edit is refused and handed back instead of overwriting anyone.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Keyboard -->
+    <section class="keys" aria-labelledby="keys-h">
+      <div class="wrap keys__inner">
+        <h2 id="keys-h">Find it in a keystroke.</h2>
+        <p>Live search across names and tags. A sortable list view for scanning, and a grid of real page thumbnails for browsing.</p>
+        <ul class="keys__list">
+          <li><span><kbd>Ctrl</kbd><kbd>O</kbd></span>Add a folder</li>
+          <li><span><kbd>Ctrl</kbd><kbd>1</kbd></span>List view</li>
+          <li><span><kbd>Ctrl</kbd><kbd>2</kbd></span>Grid view</li>
+          <li><span><kbd>Enter</kbd></span>Open the selected PDF</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Self-host -->
+    <section class="selfhost" id="self-host" aria-labelledby="selfhost-h">
+      <div class="wrap selfhost__inner">
+        <div class="selfhost__text">
+          <h2 id="selfhost-h">Your server, your papers.</h2>
+          <p>Everything shared goes through a small FastAPI service backed by Postgres and Backblaze B2. The desktop app never holds a database password or a storage key; it only knows a server address and a sign-in token.</p>
+          <p>Working solo? Folders, tags, notes, thumbnails and search all work without an account. Sign in only when you want to share.</p>
+          <a class="link-arrow" href="https://github.com/DragMaid/PDFOrganizer/blob/main/backend/README.md">Backend setup guide
+            <svg class="icon" aria-hidden="true"><use href="img/icons.svg#arrow-right"/></svg></a>
+        </div>
+        <div class="code" role="group" aria-label="Running the backend">
+          <div class="code__bar"><span>Terminal</span>
+            <button type="button" class="code__copy" data-copy="code-backend" aria-label="Copy commands">
+              <svg class="icon" aria-hidden="true"><use href="img/icons.svg#copy"/></svg><span>Copy</span>
+            </button>
+          </div>
+<pre id="code-backend"><code><span class="c"># in PDFOrganizer/backend</span>
+uv sync
+cp .env.example .env
+<span class="c"># edit .env: JWT secret, B2 keys</span>
+uv run python init_db.py
+uv run uvicorn app.main:app --port 8000</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Download -->
+    <section class="download" id="download" aria-labelledby="download-h">
+      <div class="wrap">
+        <img class="download__icon" src="img/apple-touch-icon.png" alt="" width="88" height="88" loading="lazy">
+        <h2 id="download-h">Get PDF Organizer.</h2>
+        <p class="download__lede">Free and MIT-licensed. <span data-release-version>Prebuilt for every desktop.</span></p>
+        <ul class="platforms">
+          <li class="platform" data-platform="linux">
+            <svg class="platform__mark" aria-hidden="true"><use href="img/icons.svg#linux"/></svg>
+            <div class="platform__name"><strong>Linux</strong><span>AppImage · x86_64</span></div>
+            <a class="btn btn--small" href="https://github.com/DragMaid/PDFOrganizer/releases/latest" data-asset="linux-x86_64.AppImage">
+              <svg class="icon" aria-hidden="true"><use href="img/icons.svg#download"/></svg>Download</a>
+          </li>
+          <li class="platform" data-platform="mac">
+            <svg class="platform__mark" aria-hidden="true"><use href="img/icons.svg#apple"/></svg>
+            <div class="platform__name"><strong>macOS</strong><span>Disk image · Apple silicon &amp; Intel</span></div>
+            <a class="btn btn--small" href="https://github.com/DragMaid/PDFOrganizer/releases/latest" data-asset="macos-universal.dmg">
+              <svg class="icon" aria-hidden="true"><use href="img/icons.svg#download"/></svg>Download</a>
+          </li>
+          <li class="platform" data-platform="windows">
+            <svg class="platform__mark" aria-hidden="true"><use href="img/icons.svg#windows"/></svg>
+            <div class="platform__name"><strong>Windows</strong><span>Zip · x64</span></div>
+            <a class="btn btn--small" href="https://github.com/DragMaid/PDFOrganizer/releases/latest" data-asset="windows-x64.zip">
+              <svg class="icon" aria-hidden="true"><use href="img/icons.svg#download"/></svg>Download</a>
+          </li>
+        </ul>
+        <p class="download__note">The macOS build isn't notarized yet. The first time you open it, allow it under <strong>System Settings › Privacy &amp; Security</strong>. Prefer to build it yourself? <a href="https://github.com/DragMaid/PDFOrganizer#-get-it-running">Build from source</a>.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap footer__inner">
+      <a class="brand" href="#top"><img src="img/icon-64.png" alt="" width="22" height="22"><span>PDF Organizer</span></a>
+      <p>Made for people who read too many papers.</p>
+      <ul class="footer__links">
+        <li><a href="https://github.com/DragMaid/PDFOrganizer">Source</a></li>
+        <li><a href="https://github.com/DragMaid/PDFOrganizer/releases">Releases</a></li>
+        <li><a href="https://github.com/DragMaid/PDFOrganizer/blob/main/LICENSE">MIT License</a></li>
+      </ul>
+    </div>
+  </footer>
+</body>
+</html>
