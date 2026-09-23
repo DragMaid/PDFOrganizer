@@ -2,3 +2,6 @@
 .aider*
 
 **/__pycache__/
+
+# Impeccable review captures (regenerated per review)
+.impeccable/review/

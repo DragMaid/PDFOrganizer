@@ -1359,7 +1359,7 @@ void MainWindow::promptSignIn() {
   LoginDialog dlg(m_api, this);
   dlg.setServerUrl(
       m_db->getSetting(QStringLiteral("serverUrl"),
-                       QStringLiteral("https://pdforganizer-2k92.onrender.com"))
+                       QStringLiteral("https://pdforganizer.pbh-dev.tech"))
           .toString());
   dlg.setEmail(m_db->getSetting(QStringLiteral("userEmail")).toString());
 
