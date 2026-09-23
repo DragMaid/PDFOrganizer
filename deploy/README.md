@@ -17,7 +17,9 @@ It runs on the same VPS as the Portfolio stack and shares its Traefik:
 - **`docker-compose.prod.yml`** (repo root): the whole stack. Postgres, a one-shot `migrate`
   (`python init_db.py` with the release's own image), the API and the site. It publishes no
   ports; `api` and `site` join the external `traefik` network and route themselves with
-  labels. Postgres sits on a private network only this stack can reach.
+  labels. Postgres sits on a private network only this stack can reach. With
+  `PDFORG_DATABASE_URL` set (e.g. Supabase), Postgres is not run at all; see
+  [External database](#external-database-supabase).
 - **`ansible/`**: one-time (re-runnable) setup on top of the Portfolio playbook, which must
   have run first because it owns Docker and Traefik. This adds the `deploy` user's key for this
   project, `/opt/pdforganizer`, and a nightly dump at 03:47.
@@ -69,6 +71,22 @@ ssh deploy@vps 'cd /opt/pdforganizer && docker compose -f docker-compose.prod.ym
 
 The PDFs themselves are in B2, and stay there if `PDFORG_B2_*` point at the same bucket.
 
+### External database (Supabase)
+
+Set `PDFORG_DATABASE_URL` in `PROD_ENV_FILE` and redeploy. `deploy.sh` then leaves the `local-db`
+compose profile off, so the `db` container never starts (and an existing one is stopped, with
+its volume kept), and `migrate`/`api` connect to that URL. `POSTGRES_PASSWORD` is not needed.
+
+- Use the **session pooler** connection string (port 5432) with the scheme changed to
+  `postgresql+psycopg://`. The direct connection is IPv6-only, and the transaction pooler
+  (6543) does not support the prepared statements psycopg uses.
+- Backups still run: `backup.sh` dumps the `public` schema with a throwaway `postgres:17`
+  client container. Restore one with `pg_restore -d "<url without +psycopg>" --clean
+  --if-exists --no-owner backups/<file>.dump`.
+- To move data over from the local container, dump it (`./backup.sh pre-supabase`) *before*
+  switching, restore that into Supabase as above, then deploy with the URL set.
+- Going back is emptying `PDFORG_DATABASE_URL` (and setting `POSTGRES_PASSWORD`).
+
 ## Day to day
 
 - **Release the server and site**: merge to `main`. Nothing else.
@@ -81,7 +99,7 @@ The PDFs themselves are in B2, and stay there if `PDFORG_B2_*` point at the same
   pre-deploy dump.
 - **Change a secret/setting**: edit `PROD_ENV_FILE`, re-run the latest Deploy.
 - **Logs**: `ssh deploy@vps 'cd /opt/pdforganizer && docker compose -f docker-compose.prod.yml logs -f api'`
-- **Restore a dump**:
+- **Restore a dump** (local database; for an external one see above):
   ```sh
   cd /opt/pdforganizer
   docker compose -f docker-compose.prod.yml exec -T db \

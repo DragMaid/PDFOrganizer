@@ -7,6 +7,10 @@
 # On a failed health check it puts the previous tag back and exits non-zero, so the
 # workflow run goes red while the site keeps serving the last good release. The schema step
 # is not reversed by that, which is why a database dump is taken before every rollout.
+#
+# With PDFORG_DATABASE_URL set in .env the database is external (e.g. Supabase) and the `db`
+# container is not run; otherwise the `local-db` profile is switched on for every compose
+# command in this directory, cron's backups and manual ones included.
 
 set -euo pipefail
 
@@ -15,13 +19,25 @@ cd "$(dirname "$0")"
 compose=(docker compose -f docker-compose.prod.yml)
 ghcr_user="${1:-}"
 
+# sed rather than grep, so a missing key is an empty string instead of a pipefail exit.
 env_value() {
-    grep -E "^$1=" .env | tail -n1 | cut -d= -f2-
+    sed -n "s/^$1=//p" .env | tail -n1
 }
 
 new_tag="$(env_value IMAGE_TAG)"
 previous_tag="$(cat .current-tag 2>/dev/null || true)"
 site_domain="$(env_value SITE_DOMAIN)"
+database_url="$(env_value PDFORG_DATABASE_URL)"
+
+# Compose reads COMPOSE_PROFILES from .env, so this decides for every later command too.
+sed -i '/^COMPOSE_PROFILES=/d' .env
+if [[ -z "$database_url" ]]; then
+    if [[ -z "$(env_value POSTGRES_PASSWORD)" ]]; then
+        echo "!! Set POSTGRES_PASSWORD, or PDFORG_DATABASE_URL for an external database"
+        exit 1
+    fi
+    echo "COMPOSE_PROFILES=local-db" >> .env
+fi
 
 echo "==> Deploying ${new_tag} (previous: ${previous_tag:-none})"
 
@@ -36,9 +52,9 @@ pull_status=0
 [[ -n "$token" ]] && docker logout ghcr.io >/dev/null
 (( pull_status == 0 )) || { echo "!! pull failed"; exit "$pull_status"; }
 
-# Dump before anything touches the schema. Skipped on the very first deploy, when there is
-# no database yet.
-if [[ -n "$("${compose[@]}" ps --status running --quiet db)" ]]; then
+# Dump before anything touches the schema. Skipped on the very first deploy of a local
+# database, when there is none yet.
+if [[ -n "$database_url" || -n "$("${compose[@]}" ps --status running --quiet db)" ]]; then
     ./backup.sh pre-deploy
 fi
 
@@ -78,6 +94,12 @@ rollback() {
 
 "${compose[@]}" up -d --remove-orphans || rollback
 healthy || rollback
+
+# A profiled-out service is not an orphan, so after switching to an external database the
+# old container would keep running. Stopped, not removed: its volume stays as it was.
+if [[ -n "$database_url" ]]; then
+    "${compose[@]}" stop db
+fi
 
 echo "$new_tag" > .current-tag
 

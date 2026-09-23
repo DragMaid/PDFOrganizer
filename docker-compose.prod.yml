@@ -2,7 +2,8 @@
 # dev database is backend/docker-compose.yml; this one runs the images CI pushes to GHCR.
 #
 # It lives on the VPS at /opt/pdforganizer next to a .env the deploy workflow writes — see
-# deploy/.env.example for every variable.
+# deploy/.env.example for every variable. With PDFORG_DATABASE_URL set (e.g. Supabase) the
+# `db` container is not started and everything uses that URL instead.
 # themselves with labels, so this stack shares 80/443 with the other sites on the machine.
 #
 #   docker compose -f docker-compose.prod.yml ps
@@ -18,7 +19,9 @@ x-logging: &logging
     max-file: "5"
 
 x-api-environment: &api-environment
-  PDFORG_DATABASE_URL: postgresql+psycopg://pdforg:${POSTGRES_PASSWORD:?}@db:5432/pdforg
+  # An external database (e.g. Supabase) when PDFORG_DATABASE_URL is set, else the `db`
+  # container below.
+  PDFORG_DATABASE_URL: ${PDFORG_DATABASE_URL:-postgresql+psycopg://pdforg:${POSTGRES_PASSWORD:-}@db:5432/pdforg}
   PDFORG_JWT_SECRET: ${PDFORG_JWT_SECRET:?}
   PDFORG_ACCESS_TOKEN_TTL_MINUTES: ${PDFORG_ACCESS_TOKEN_TTL_MINUTES:-30}
   PDFORG_REFRESH_TOKEN_TTL_DAYS: ${PDFORG_REFRESH_TOKEN_TTL_DAYS:-30}
@@ -32,13 +35,17 @@ x-api-environment: &api-environment
   PDFORG_CORS_ORIGINS: "[]"
 
 services:
+  # Only runs under the `local-db` profile, which deploy.sh turns on when PDFORG_DATABASE_URL
+  # is empty. No `:?` on the password here: Compose interpolates disabled services too, so
+  # deploy.sh is what insists on it.
   db:
     image: postgres:17
+    profiles: [local-db]
     restart: unless-stopped
     environment:
       POSTGRES_DB: pdforg
       POSTGRES_USER: pdforg
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
     volumes:
       - db-data:/var/lib/postgresql/data
     healthcheck:
@@ -60,6 +67,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+        # Absent (profile off) when the database is external.
+        required: false
     networks: [internal]
     logging: *logging
 
