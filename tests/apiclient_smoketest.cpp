@@ -726,7 +726,7 @@ int main(int argc, char** argv)
         restored.refreshSession([&, done]() {
             check(restored.isAuthenticated(), "session restored from token");
             restored.listGroups([&, done](const QList<ApiGroup>& groups) {
-                check(groups.size() == 2, "restored session can read groups");
+                check(groups.size() == 3, "restored session can read groups");  // personal, Research, Shared By Code
                 done();
             });
         });
