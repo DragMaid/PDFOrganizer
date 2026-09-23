@@ -1,0 +1,4 @@
+{
+  "prompt": "Sourced, not generated: the project's own app screenshot assets/screenshot.png (1920x1080). Cropped to the app window (1920x1031+0+19, removing the desktop's tmux and status bars), with the member email replaced by jakekato@example.com (drawn with ImageMagick). Full window resized to 1100px wide, WebP q86.",
+  "createdAt": "2026-09-23T06:33:33.879Z"
+}

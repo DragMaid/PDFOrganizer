@@ -1,0 +1,4 @@
+Dockerfile
+.dockerignore
+# Provenance sidecars for the rasters; kept in the repo, not served.
+img/*.json
