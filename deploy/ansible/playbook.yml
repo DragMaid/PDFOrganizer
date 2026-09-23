@@ -1,0 +1,188 @@
+# Prepares a shared Ubuntu/Debian VPS to run the pdforganizer stack. Idempotent — safe to
+# re-run whenever this file changes. Day-to-day releases do NOT go through here; they are
+# the deploy workflow (.github/workflows/deploy.yml) SSHing in as `deploy`.
+#
+# What it touches, and deliberately what it does not, because other sites share the host:
+#   - installs Docker only when no `docker` binary exists yet (never swaps an existing one)
+#   - runs ONE shared Traefik at /opt/traefik on ports 80/443 (Let's Encrypt included);
+#     sites join the `traefik` Docker network and route themselves with container labels.
+#     Anything else holding 80/443 (e.g. a host nginx) has to be moved behind it first
+#   - creates a `deploy` user that owns /opt/pdforganizer (docker group = root-equivalent;
+#     the key is dedicated to this purpose so it can be revoked on its own)
+#   - installs unattended-upgrades for OS security patches and a nightly DB dump cron
+#   - does NOT manage the firewall: only Traefik publishes ports, and Docker bypasses
+#     ufw rules for published ports anyway
+
+- name: Prepare VPS for the pdforganizer stack
+  hosts: pdforganizer
+  become: true
+
+  vars:
+    deploy_user: deploy
+    app_dir: /opt/pdforganizer
+    traefik_dir: /opt/traefik
+    traefik_version: v3.6
+    # Must match the external network docker-compose.prod.yml joins.
+    traefik_network: traefik
+    # letsencrypt needs DNS for both names pointing here. selfsigned is for before that:
+    # Traefik serves its default certificate and browsers warn, but the stack is reachable
+    # (e.g. via /etc/hosts). Switching to letsencrypt later is a re-run of this playbook.
+    # Play vars outrank inventory vars, so the default lives in a filter rather than
+    # as `tls_mode:` here — otherwise tls_mode set in inventory.ini would be ignored.
+    tls: "{{ tls_mode | default('letsencrypt') }}"
+
+  tasks:
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - unattended-upgrades
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Enable unattended security upgrades
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+
+    - name: Check for an existing Docker install
+      ansible.builtin.command: which docker
+      register: docker_binary
+      changed_when: false
+      failed_when: false
+
+    - name: Install Docker Engine with the compose plugin
+      when: docker_binary.rc != 0
+      block:
+        - name: Create the apt keyrings directory
+          ansible.builtin.file:
+            path: /etc/apt/keyrings
+            state: directory
+            mode: "0755"
+
+        - name: Add Docker's apt key
+          ansible.builtin.get_url:
+            url: "https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg"
+            dest: /etc/apt/keyrings/docker.asc
+            mode: "0644"
+
+        - name: Add Docker's apt repository
+          ansible.builtin.deb822_repository:
+            name: docker
+            types: deb
+            uris: https://download.docker.com/linux/ubuntu
+            suites: "{{ ansible_facts['distribution_release'] }}"
+            components: stable
+            signed_by: /etc/apt/keyrings/docker.asc
+            state: present
+
+        - name: Install Docker packages
+          ansible.builtin.apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+              - docker-buildx-plugin
+              - docker-compose-plugin
+            state: present
+            update_cache: true
+
+    - name: Ensure the compose plugin is present
+      ansible.builtin.command: docker compose version
+      changed_when: false
+
+    - name: Ensure Docker is running and starts on boot
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Create the deploy user
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        shell: /bin/bash
+        groups: docker
+        append: true
+
+    - name: Authorize the CI deploy key
+      ansible.posix.authorized_key:
+        user: "{{ deploy_user }}"
+        key: "{{ lookup('file', deploy_public_key_file) }}"
+        exclusive: false
+
+    - name: Create the app directory
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0750"
+      loop:
+        - "{{ app_dir }}"
+        - "{{ app_dir }}/backups"
+
+    # TODO: since app scale is small, nightly is good, if the data become more crucial in the
+    # future, we should consider doing PITR (point in time backup)
+    - name: Nightly database backup
+      ansible.builtin.cron:
+        name: pdforganizer database backup
+        user: "{{ deploy_user }}"
+        minute: "17"
+        hour: "3"
+        job: "[ -x {{ app_dir }}/backup.sh ] && {{ app_dir }}/backup.sh nightly >> {{ app_dir }}/backups/backup.log 2>&1"
+
+    - name: Validate tls_mode
+      ansible.builtin.assert:
+        that: tls in ['letsencrypt', 'selfsigned']
+        fail_msg: "tls_mode must be 'letsencrypt' or 'selfsigned', got '{{ tls }}'"
+
+    - name: Check for the shared proxy network
+      ansible.builtin.command: docker network inspect {{ traefik_network }}
+      register: traefik_network_check
+      changed_when: false
+      failed_when: false
+
+    - name: Create the shared proxy network
+      when: traefik_network_check.rc != 0
+      ansible.builtin.command: docker network create {{ traefik_network }}
+
+    - name: Create the Traefik directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ traefik_dir }}"
+        # acme.json holds the certificates' private keys.
+        - "{{ traefik_dir }}/letsencrypt"
+
+    - name: Install the Traefik config
+      ansible.builtin.template:
+        src: "templates/{{ item.src }}"
+        dest: "{{ traefik_dir }}/{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - { src: traefik.yml.j2, dest: traefik.yml }
+        - { src: traefik-compose.yml.j2, dest: docker-compose.yml }
+      notify: Restart Traefik
+
+    - name: Start Traefik
+      ansible.builtin.command: docker compose up -d
+      args:
+        chdir: "{{ traefik_dir }}"
+      register: traefik_up
+      changed_when: "'Started' in traefik_up.stderr or 'Recreated' in traefik_up.stderr"
+
+  handlers:
+    # Static config is only read at startup.
+    - name: Restart Traefik
+      ansible.builtin.command: docker compose up -d --force-recreate
+      args:
+        chdir: "{{ traefik_dir }}"
+      changed_when: true
