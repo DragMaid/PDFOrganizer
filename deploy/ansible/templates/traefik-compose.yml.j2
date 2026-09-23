@@ -1,0 +1,28 @@
+# {{ ansible_managed }}
+# The host's reverse proxy: terminates TLS on 80/443 and routes by container label.
+# Shared by every site on the box, so it lives outside any one app's stack.
+
+name: traefik
+
+services:
+  traefik:
+    image: traefik:{{ traefik_version }}
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - {{ traefik_network }}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  {{ traefik_network }}:
+    external: true

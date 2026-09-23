@@ -1,0 +1,50 @@
+# {{ ansible_managed }}
+# Static config for the host's shared Traefik. Routing lives in container labels: any
+# compose stack on the `{{ traefik_network }}` network that sets `traefik.enable=true` is
+# picked up, so the other sites on the box plug in the same way.
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+
+  websecure:
+    address: ":443"
+    http:
+{% if tls == 'letsencrypt' %}
+      # Every router on this entry point gets a certificate for the hosts in its rule.
+      tls:
+        certResolver: letsencrypt
+{% else %}
+      # No resolver: Traefik serves its built-in self-signed certificate. Browsers warn,
+      # but the stack is reachable (e.g. via /etc/hosts) before DNS points here.
+      tls: {}
+{% endif %}
+    transport:
+      respondingTimeouts:
+        # Media uploads (up to Media:MaxVideoBytes) stream through to B2, and job-fit
+        # analysis can take a while; the 60s default cuts both off on a slow link.
+        readTimeout: 300s
+        writeTimeout: 300s
+
+providers:
+  docker:
+    exposedByDefault: false
+    network: {{ traefik_network }}
+
+{% if tls == 'letsencrypt' %}
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: {{ letsencrypt_email }}
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web
+{% endif %}
+
+log:
+  level: INFO

@@ -1,0 +1,110 @@
+# Production stack: Postgres, a one-shot schema step, the API, and the showcase site. The
+# dev database is backend/docker-compose.yml; this one runs the images CI pushes to GHCR.
+#
+# It lives on the VPS at /opt/pdforganizer next to a .env the deploy workflow writes — see
+# deploy/.env.example for every variable. With PDFORG_DATABASE_URL set (e.g. Supabase) the
+# `db` container is not started and everything uses that URL instead.
+# themselves with labels, so this stack shares 80/443 with the other sites on the machine.
+#
+#   docker compose -f docker-compose.prod.yml ps
+#   docker compose -f docker-compose.prod.yml logs -f api
+
+name: pdforganizer
+
+x-logging: &logging
+  # Capped per container, so a noisy service cannot fill the disk the other sites share.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-api-environment: &api-environment
+  # An external database (e.g. Supabase) when PDFORG_DATABASE_URL is set, else the `db`
+  # container below.
+  PDFORG_DATABASE_URL: ${PDFORG_DATABASE_URL:-postgresql+psycopg://pdforg:${POSTGRES_PASSWORD:-}@db:5432/pdforg}
+  PDFORG_JWT_SECRET: ${PDFORG_JWT_SECRET:?}
+  PDFORG_ACCESS_TOKEN_TTL_MINUTES: ${PDFORG_ACCESS_TOKEN_TTL_MINUTES:-30}
+  PDFORG_REFRESH_TOKEN_TTL_DAYS: ${PDFORG_REFRESH_TOKEN_TTL_DAYS:-30}
+  PDFORG_B2_KEY_ID: ${PDFORG_B2_KEY_ID:?}
+  PDFORG_B2_APPLICATION_KEY: ${PDFORG_B2_APPLICATION_KEY:?}
+  PDFORG_B2_BUCKET_ID: ${PDFORG_B2_BUCKET_ID:?}
+  PDFORG_B2_BUCKET_NAME: ${PDFORG_B2_BUCKET_NAME:?}
+  PDFORG_MAX_UPLOAD_BYTES: ${PDFORG_MAX_UPLOAD_BYTES:-209715200}
+  PDFORG_ALLOW_REGISTRATION: ${PDFORG_ALLOW_REGISTRATION:-true}
+  # The desktop client needs no CORS; nothing in a browser calls the API.
+  PDFORG_CORS_ORIGINS: "[]"
+
+services:
+  # Only runs under the `local-db` profile, which deploy.sh turns on when PDFORG_DATABASE_URL
+  # is empty. No `:?` on the password here: Compose interpolates disabled services too, so
+  # deploy.sh is what insists on it.
+  db:
+    image: postgres:17
+    profiles: [local-db]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pdforg
+      POSTGRES_USER: pdforg
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pdforg -d pdforg"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+    logging: *logging
+
+  # One-shot: brings the schema up to date with the release's own models (init_db.py is
+  # idempotent), then exits. `api` waits for it, so a failed schema step stops the rollout
+  # before new code runs against it.
+  migrate:
+    image: ${IMAGE_PREFIX:?}/pdforganizer-api:${IMAGE_TAG:?}
+    command: ["python", "init_db.py"]
+    restart: "no"
+    environment: *api-environment
+    depends_on:
+      db:
+        condition: service_healthy
+        # Absent (profile off) when the database is external.
+        required: false
+    networks: [internal]
+    logging: *logging
+
+  api:
+    image: ${IMAGE_PREFIX:?}/pdforganizer-api:${IMAGE_TAG:?}
+    restart: unless-stopped
+    environment: *api-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal, traefik]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik
+      traefik.http.routers.pdforg-api.rule: Host(`api.${SITE_DOMAIN:?}`)
+      traefik.http.routers.pdforg-api.entrypoints: websecure
+      traefik.http.services.pdforg-api.loadbalancer.server.port: "8000"
+    logging: *logging
+
+  site:
+    image: ${IMAGE_PREFIX:?}/pdforganizer-site:${IMAGE_TAG:?}
+    restart: unless-stopped
+    networks: [traefik]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: traefik
+      traefik.http.routers.pdforg-site.rule: Host(`${SITE_DOMAIN:?}`)
+      traefik.http.routers.pdforg-site.entrypoints: websecure
+      traefik.http.services.pdforg-site.loadbalancer.server.port: "80"
+    logging: *logging
+
+volumes:
+  db-data:
+
+networks:
+  # The database is reachable only from this stack, never from the shared proxy network.
+  internal:
+  traefik:
+    external: true

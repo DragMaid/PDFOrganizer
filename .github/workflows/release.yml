@@ -16,8 +16,13 @@ env:
   QT_VERSION: 6.8.1
 
 jobs:
+  # Same suite PRs and deploys run. A commit that does not pass does not get packaged.
+  test:
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: ${{ matrix.name }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

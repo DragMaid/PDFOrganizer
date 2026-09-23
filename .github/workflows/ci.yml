@@ -1,0 +1,177 @@
+name: CI
+
+# Pull requests, and every caller that needs a green suite first (deploy on main, release on
+# a tag): backend tests against real Postgres, the desktop client built and checked against
+# that backend over the wire, and the showcase site validated.
+
+on:
+  pull_request:
+  workflow_call:
+
+# Drop the old run when a newer push to the same PR arrives.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  QT_VERSION: 6.8.1
+  # Same database for both jobs that need one, reached on the runner's localhost.
+  PDFORG_TEST_DATABASE_URL: postgresql+psycopg://pdforg:pdforg@localhost:55432/pdforg
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+
+    # Real Postgres on purpose: the concurrency guarantees are ON CONFLICT DO NOTHING, which
+    # SQLite would not exercise.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: pdforg
+          POSTGRES_USER: pdforg
+          POSTGRES_PASSWORD: pdforg
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U pdforg -d pdforg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # psycopg2 has no Linux wheel and compiles against libpq.
+      - name: Install libpq headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq-dev
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install
+        working-directory: backend
+        run: uv sync --locked
+
+      - name: Test
+        working-directory: backend
+        # `python -m` puts backend/ on sys.path so the tests can import `app`.
+        run: uv run python -m pytest -q --junitxml=${{ runner.temp }}/backend-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: ${{ runner.temp }}/backend-results.xml
+          if-no-files-found: ignore
+
+  client:
+    name: Client build + API smoke test
+    runs-on: ubuntu-22.04
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: pdforg
+          POSTGRES_USER: pdforg
+          POSTGRES_PASSWORD: pdforg
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U pdforg -d pdforg"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libpq-dev libgl1-mesa-dev libxkbcommon-dev
+
+      - name: Install Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          modules: qtwebsockets qtpdf
+          cache: true
+
+      # The whole app, so a change that breaks the client fails here rather than at release,
+      # plus the ApiClient smoke test.
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_API_SMOKETEST=ON
+          cmake --build build --parallel
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Start the backend
+        working-directory: backend
+        env:
+          PDFORG_DATABASE_URL: ${{ env.PDFORG_TEST_DATABASE_URL }}
+          PDFORG_JWT_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+        run: |
+          uv sync --locked
+          uv run python init_db.py
+          uv run uvicorn app.main:app --port 8000 > "${RUNNER_TEMP}/uvicorn.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            curl -fs http://127.0.0.1:8000/health | grep -q '"status":"ok"' && exit 0
+            sleep 1
+          done
+          cat "${RUNNER_TEMP}/uvicorn.log"
+          exit 1
+
+      # Proves the C++ client and the Python server agree on the wire format. B2 is not
+      # configured here, which the smoke test expects and checks for.
+      - name: API smoke test
+        run: ./build/apiclient_smoketest http://127.0.0.1:8000
+
+      - name: Backend log
+        if: failure()
+        run: cat "${RUNNER_TEMP}/uvicorn.log" || true
+
+  site:
+    name: Showcase site
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate HTML
+        run: npx --yes html-validate@9 site/index.html
+
+      # Every local src/href/url() the page references must exist, so a renamed asset
+      # fails here instead of shipping a broken image.
+      - name: Check local references
+        run: |
+          missing=0
+          refs=$( { grep -oE '(src|href|srcset)="[^"]+"' site/index.html | cut -d'"' -f2 | tr ',' '\n';
+                    grep -oE 'url\("[^"]+"\)' site/styles.css | cut -d'"' -f2; } \
+                  | awk '{print $1}' | grep -vE '^(https?:|#|mailto:|data:)' | sed 's/#.*//' | sort -u )
+          for ref in $refs; do
+            [[ -e "site/$ref" ]] || { echo "missing: $ref"; missing=1; }
+          done
+          exit $missing
+
+      - name: Build image
+        run: docker build -t site-check site

@@ -1,0 +1,145 @@
+name: Deploy
+
+# Every push to main: run the CI suite, build the API and site images, push them to GHCR,
+# then SSH into the VPS and roll the stack forward. Run it by hand with an image tag to roll
+# back (or forward) to any release already in the registry, without rebuilding.
+#
+# Needs a GitHub environment named `production` with:
+#   secrets  VPS_SSH_KEY       private key whose public half Ansible authorized for `deploy`
+#            VPS_KNOWN_HOSTS   output of `ssh-keyscan -p <port> <host>`, checked by hand once
+#            PROD_ENV_FILE     contents of deploy/.env.example, filled in
+#   vars     VPS_HOST, VPS_PORT (default 22), VPS_USER (default deploy)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Existing image tag (commit SHA) to deploy. Empty = build the current commit."
+        required: false
+        default: ""
+
+# One rollout at a time, and never cancel one halfway through.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # A named tag was already tested when it was built.
+  test:
+    if: inputs.image_tag == ''
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build ${{ matrix.image }}
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        include:
+          - image: pdforganizer-api
+            context: backend
+          - image: pdforganizer-site
+            context: site
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image name
+        id: name
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ matrix.image }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ${{ steps.name.outputs.ref }}:${{ github.sha }}
+            ${{ steps.name.outputs.ref }}:latest
+          # The vendor label is what deploy.sh prunes by, so it never touches other sites' images.
+          labels: |
+            org.opencontainers.image.vendor=pdforganizer
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+  deploy:
+    name: Deploy to VPS
+    needs: build
+    # Runs after a build, or on its own when a manual run names an existing tag.
+    if: >-
+      always() &&
+      (needs.build.result == 'success' ||
+       (needs.build.result == 'skipped' && inputs.image_tag != ''))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment: production
+
+    env:
+      IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+      VPS_HOST: ${{ vars.VPS_HOST }}
+      VPS_PORT: ${{ vars.VPS_PORT || '22' }}
+      VPS_USER: ${{ vars.VPS_USER || 'deploy' }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+      PROD_ENV_FILE: ${{ secrets.PROD_ENV_FILE }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      APP_DIR: /opt/pdforganizer
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_deploy
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/id_deploy ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<EOF
+          Host vps
+            HostName $VPS_HOST
+            Port $VPS_PORT
+            User $VPS_USER
+            IdentityFile ~/.ssh/id_deploy
+            StrictHostKeyChecking yes
+          EOF
+
+      - name: Write .env
+        run: |
+          umask 077
+          printf '%s\n' "$PROD_ENV_FILE" > release.env
+          echo "IMAGE_PREFIX=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> release.env
+          echo "IMAGE_TAG=$IMAGE_TAG" >> release.env
+
+      - name: Upload stack files
+        run: |
+          scp -q docker-compose.prod.yml deploy/deploy.sh deploy/backup.sh "vps:$APP_DIR/"
+          scp -q release.env "vps:$APP_DIR/.env"
+          ssh vps "chmod 600 $APP_DIR/.env && chmod +x $APP_DIR/deploy.sh $APP_DIR/backup.sh"
+
+      - name: Roll out
+        # The registry token goes over stdin, not the command line, so it never shows in `ps`.
+        run: printf '%s' "$GHCR_TOKEN" | ssh vps "$APP_DIR/deploy.sh $GITHUB_ACTOR"
+
+      - name: Clean up
+        if: always()
+        run: rm -f release.env ~/.ssh/id_deploy
