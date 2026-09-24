@@ -19,8 +19,6 @@
 
 </div>
 
----
-
 <div align="center">
   <img src="assets/screenshot.png" alt="PDF Organizer — grid view with tags, group members and notes" width="100%" />
 </div>
